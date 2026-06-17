@@ -1,8 +1,11 @@
 import asyncio
 import builtins
 import importlib
+import os
+import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import dso_load_curves_exporter.__main__ as exporter
@@ -104,6 +107,16 @@ def test_default_config_runtime_is_http_and_browser_client_is_not_imported(monke
 
     assert load_config().runtime == "http"
     assert "dso_retele_electrice.client" not in sys.modules
+
+
+def test_default_exporter_import_does_not_load_browser_client_in_fresh_process():
+    code = (
+        "import sys; "
+        "import dso_load_curves_exporter.__main__; "
+        "raise SystemExit(1 if 'dso_retele_electrice.client' in sys.modules else 0)"
+    )
+    env = {**os.environ, "PYTHONPATH": "src"}
+    subprocess.run([sys.executable, "-c", code], cwd=Path.cwd(), env=env, check=True)
 
 
 def test_browser_runtime_fails_clearly_when_playwright_is_absent(monkeypatch):

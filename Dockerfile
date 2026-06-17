@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.57.0-noble
+FROM python:3.12-slim
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
