@@ -152,6 +152,7 @@ def common_labels(meta: PodMetadata | None, account: str, pod: str) -> dict[str,
         "pod": meta.pod,
         "smartmeter_id": meta.smartmeter_id,
         "meter_serial": meta.meter_serial,
+        "constant": meta.constant,
     }
 
 

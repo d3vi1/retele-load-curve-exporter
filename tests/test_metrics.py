@@ -61,6 +61,8 @@ def test_snapshot_renders_reading_and_curve_metrics():
     assert 'scaling_status="portal_units_unscaled"' in rendered
     reading_line = next(line for line in rendered.splitlines() if line.startswith("dso_meter_reading_active_energy_kwh{"))
     curve_line = next(line for line in rendered.splitlines() if line.startswith("dso_load_curve_interval_energy_wh{"))
+    assert 'constant="1"' in reading_line
+    assert 'constant="1"' in curve_line
     assert "meter_brand=" not in reading_line
     assert "approved_power_kw=" not in reading_line
     assert "meter_brand=" not in curve_line
