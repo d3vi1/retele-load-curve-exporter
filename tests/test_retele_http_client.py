@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import date
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def fixture(name: str) -> str:
 def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
     requested_paths: list[str] = []
     posted_login_form: dict[str, str] = {}
+    posted_aura_form: dict[str, str] = {}
+    aura_query: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested_paths.append(f"{request.method} {request.url.path}")
@@ -42,6 +45,8 @@ def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
         if request.method == "GET" and request.url.path == ROUTE_PATH:
             return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
         if request.url.path == AURA_PATH:
+            posted_aura_form.update(httpx.QueryParams(request.content.decode()))
+            aura_query.update(dict(request.url.params))
             return httpx.Response(200, text=fixture("aura_pods_success.json"))
         raise AssertionError(f"unexpected request: {request.url}")
 
@@ -66,6 +71,17 @@ def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
     assert posted_login_form["loginCsrf"] == "SANITIZED_LOGIN_CSRF"
     assert posted_login_form["username"] == "sanitized-user"
     assert posted_login_form["password"] == "sanitized-password"
+    aura_message = json.loads(posted_aura_form["message"])
+    assert aura_query == {
+        "r": "4",
+        "other.PED_Search_My_POD_.getNumPOD": "1",
+        "other.PED_Search_My_POD_.searchDBVisualizzaFornitura": "1",
+    }
+    assert [action["descriptor"] for action in aura_message["actions"]] == [
+        "apex://PED_Search_My_POD_Controller/ACTION$searchDBVisualizzaFornitura",
+        "apex://PED_Search_My_POD_Controller/ACTION$getNumPOD",
+    ]
+    assert aura_message["actions"][0]["callingDescriptor"] == "markup://c:PED_SearchPOD_Functionality"
     assert session_state == SessionState.AURA_READY
     assert transitions == [
         SessionState.LOGIN_PAGE_FETCHED,

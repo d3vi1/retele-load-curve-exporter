@@ -163,7 +163,15 @@ class ReteleElectriceHttpClient:
 
     async def list_pods(self) -> list[PodMetadata]:
         await self._ensure_aura_ready()
-        response = await self._client.post(AURA_PATH, data={"message": "listPods"})
+        response = await self._client.post(
+            AURA_PATH,
+            params={
+                "r": "4",
+                "other.PED_Search_My_POD_.getNumPOD": "1",
+                "other.PED_Search_My_POD_.searchDBVisualizzaFornitura": "1",
+            },
+            data={"message": json.dumps(_pod_discovery_aura_message(), separators=(",", ":"))},
+        )
         self._validate_aura_response(response, "POD discovery")
         return self.parse_aura_pod_discovery_response(response.text, account=self.account)
 
@@ -572,6 +580,31 @@ def _frontdoor_redirect_url(text: str, page_url: str) -> str:
             continue
         return target
     return ""
+
+
+def _pod_discovery_aura_message() -> dict[str, Any]:
+    return {
+        "actions": [
+            {
+                "id": "1;a",
+                "descriptor": "apex://PED_Search_My_POD_Controller/ACTION$searchDBVisualizzaFornitura",
+                "callingDescriptor": "markup://c:PED_SearchPOD_Functionality",
+                "params": {
+                    "county": "",
+                    "city": "",
+                    "POD": "",
+                    "power": "",
+                    "distributioncompany": "",
+                },
+            },
+            {
+                "id": "2;a",
+                "descriptor": "apex://PED_Search_My_POD_Controller/ACTION$getNumPOD",
+                "callingDescriptor": "markup://c:PED_SearchPOD_Functionality",
+                "params": {},
+            },
+        ]
+    }
 
 
 @dataclass(frozen=True)
