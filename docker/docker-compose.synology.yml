@@ -1,0 +1,23 @@
+services:
+  dso-load-curve-exporter:
+    build:
+      context: .
+    image: dso-load-curve-exporter:local
+    container_name: dso-load-curve-exporter
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      EXPORTER_HOST: 0.0.0.0
+      EXPORTER_PORT: "9831"
+      EXPORTER_POLL_SECONDS: "${EXPORTER_POLL_SECONDS:-900}"
+      EXPORTER_HEADLESS: "true"
+    ports:
+      - "9831:9831/tcp"
+    networks:
+      - prometheus-tancabesti
+
+networks:
+  prometheus-tancabesti:
+    external: true
+    name: prometheus-tancabesti_default

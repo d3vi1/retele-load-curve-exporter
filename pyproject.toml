@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dso-load-curve-exporter"
+version = "0.1.0"
+description = "Reusable Romanian DSO clients and a Prometheus exporter for meter readings and load curves."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "playwright>=1.45",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+dso-load-curves-exporter = "dso_load_curves_exporter.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

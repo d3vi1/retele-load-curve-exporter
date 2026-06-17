@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import asdict
+
+from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
+
+
+class Snapshot:
+    def __init__(self) -> None:
+        self.metadata: dict[tuple[str, str], PodMetadata] = {}
+        self.readings: list[MeterReading] = []
+        self.curves: list[LoadCurveSample] = []
+        self.last_success: float = 0
+        self.last_attempt: float = 0
+        self.last_error: str = ""
+        self.errors_total: int = 0
+
+    def render(self) -> str:
+        lines = [
+            "# HELP dso_exporter_last_attempt_timestamp_seconds Last scrape attempt timestamp.",
+            "# TYPE dso_exporter_last_attempt_timestamp_seconds gauge",
+            f"dso_exporter_last_attempt_timestamp_seconds {self.last_attempt or 0}",
+            "# HELP dso_exporter_last_success_timestamp_seconds Last successful portal scrape timestamp.",
+            "# TYPE dso_exporter_last_success_timestamp_seconds gauge",
+            f"dso_exporter_last_success_timestamp_seconds {self.last_success or 0}",
+            "# HELP dso_exporter_fetch_success Last fetch success as 1 or 0.",
+            "# TYPE dso_exporter_fetch_success gauge",
+            f'dso_exporter_fetch_success{{last_error="{esc(self.last_error)}"}} {1 if self.last_success >= self.last_attempt and not self.last_error else 0}',
+            "# HELP dso_exporter_fetch_errors_total Portal scrape errors.",
+            "# TYPE dso_exporter_fetch_errors_total counter",
+            f"dso_exporter_fetch_errors_total {self.errors_total}",
+            "# HELP dso_load_curve_meter_info Static meter metadata.",
+            "# TYPE dso_load_curve_meter_info gauge",
+        ]
+        for meta in self.metadata.values():
+            lines.append(f"dso_load_curve_meter_info{{{label_text(meta_labels(meta))}}} 1")
+
+        lines.extend(
+            [
+                "# HELP dso_meter_reading_active_energy_kwh Meter cumulative active import reading.",
+                "# TYPE dso_meter_reading_active_energy_kwh gauge",
+                "# HELP dso_meter_reading_export_active_energy_kwh Meter cumulative active export reading.",
+                "# TYPE dso_meter_reading_export_active_energy_kwh gauge",
+                "# HELP dso_meter_reading_reactive_energy_kvarh Meter cumulative reactive reading.",
+                "# TYPE dso_meter_reading_reactive_energy_kvarh gauge",
+            ]
+        )
+        for reading in self.readings:
+            meta = self.metadata.get((reading.account, reading.pod))
+            labels = common_labels(meta, reading.account, reading.pod)
+            labels.update(
+                {
+                    "meter_serial": reading.meter_serial or labels.get("meter_serial", ""),
+                    "smartmeter_id": reading.meter_serial or labels.get("smartmeter_id", ""),
+                    "obis_code": reading.obis_code,
+                    "channel": reading.channel,
+                    "reading_type": reading.reading_type,
+                    "source_timestamp": reading.read_at.isoformat(),
+                    "constant": reading.constant or labels.get("constant", ""),
+                }
+            )
+            metric = "dso_meter_reading_active_energy_kwh"
+            if reading.channel == "active_export":
+                metric = "dso_meter_reading_export_active_energy_kwh"
+            elif reading.unit.lower() == "kvarh":
+                metric = "dso_meter_reading_reactive_energy_kvarh"
+            lines.append(f"{metric}{{{label_text(labels)}}} {fmt(reading.value)}")
+
+        lines.extend(
+            [
+                "# HELP dso_load_curve_interval_energy_wh Load-curve interval active energy.",
+                "# TYPE dso_load_curve_interval_energy_wh gauge",
+                "# HELP dso_load_curve_interval_reactive_energy_varh Load-curve interval reactive energy.",
+                "# TYPE dso_load_curve_interval_reactive_energy_varh gauge",
+                "# HELP dso_load_curve_average_power_w Derived average active power.",
+                "# TYPE dso_load_curve_average_power_w gauge",
+                "# HELP dso_load_curve_average_reactive_power_var Derived average reactive power.",
+                "# TYPE dso_load_curve_average_reactive_power_var gauge",
+            ]
+        )
+        for curve in self.curves:
+            meta = self.metadata.get((curve.account, curve.pod))
+            labels = common_labels(meta, curve.account, curve.pod)
+            labels.update(
+                {
+                    "obis_code": curve.obis_code,
+                    "channel": curve.channel,
+                    "interval": "PT15M",
+                    "source_timestamp": curve.start_at.isoformat(),
+                    "source_quantity": "interval_energy",
+                    "value_source": "portal_load_curve",
+                    "scaling_status": "scaled" if labels.get("constant") else "unscaled_missing_constant",
+                }
+            )
+            if curve.interval_unit == "Wh":
+                lines.append(f"dso_load_curve_interval_energy_wh{{{label_text(labels)}}} {fmt(curve.interval_value)}")
+                p_labels = labels | {"source_quantity": "derived_power", "value_source": "derived_from_interval_energy"}
+                lines.append(f"dso_load_curve_average_power_w{{{label_text(p_labels)}}} {fmt(curve.average_value)}")
+            else:
+                lines.append(f"dso_load_curve_interval_reactive_energy_varh{{{label_text(labels)}}} {fmt(curve.interval_value)}")
+                p_labels = labels | {"source_quantity": "derived_reactive_power", "value_source": "derived_from_interval_reactive_energy"}
+                lines.append(f"dso_load_curve_average_reactive_power_var{{{label_text(p_labels)}}} {fmt(curve.average_value)}")
+        return "\n".join(lines) + "\n"
+
+
+def meta_labels(meta: PodMetadata) -> dict[str, str]:
+    return common_labels(meta, meta.account, meta.pod)
+
+
+def common_labels(meta: PodMetadata | None, account: str, pod: str) -> dict[str, str]:
+    if meta is None:
+        return {
+            "distributor": "retele_electrice",
+            "account": account,
+            "pod": pod,
+            "smartmeter_id": "",
+            "meter_serial": "",
+            "constant": "",
+        }
+    return {
+        "distributor": meta.distributor,
+        "account": meta.account,
+        "pod": meta.pod,
+        "smartmeter_id": meta.smartmeter_id,
+        "meter_serial": meta.meter_serial,
+        "meter_brand": meta.meter_brand,
+        "meter_type": meta.meter_type,
+        "accuracy_class": meta.accuracy_class,
+        "interval": meta.interval,
+        "meter_status": meta.meter_status,
+        "delimitation_voltage": meta.delimitation_voltage,
+        "atr_cer_number": meta.atr_cer_number,
+        "atr_cer_date": meta.atr_cer_date,
+        "consumption_address": meta.address,
+        "approved_power_kw": meta.approved_power_kw,
+        "mount_date": meta.mount_date,
+        "constant": meta.constant,
+        "supplier": meta.supplier,
+        "balancing_responsible_party": meta.balancing_responsible_party,
+    }
+
+
+def label_text(labels: dict[str, str]) -> str:
+    return ",".join(f'{key}="{esc(value)}"' for key, value in sorted(labels.items()))
+
+
+def esc(value: object) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def fmt(value: float) -> str:
+    if not math.isfinite(value):
+        return "NaN"
+    return f"{value:.12g}"
