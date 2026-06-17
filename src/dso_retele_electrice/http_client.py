@@ -10,11 +10,21 @@ from typing import Any
 
 import httpx
 
+from .http_core import (
+    AuraStatus,
+    SessionState,
+    VisualforcePartialStatus,
+    classify_visualforce_partial_response,
+    parse_visualforce_hidden_fields,
+    validate_aura_response,
+)
+from .http_session import HttpSessionStateMachine, StateTransition
 from .models import LoadCurveSample, MeterReading, PodMetadata
 from .parsing import BUCHAREST, OBIS_BY_CHANNEL, decimal_ro, parse_ro_date
 
 BASE_URL = "https://contulmeu.reteleelectrice.ro"
 LOGIN_PATH = "/PEDRO_SiteLogin"
+ROUTE_PATH = "/s/"
 AURA_PATH = "/s/sfsites/aura"
 READINGS_PATH = "/PED_ProxyCallWSAsynSingleSelf_VF"
 CURVE_PATH = "/PED_ProxyCallWSAsync_Curve_VF"
@@ -65,7 +75,7 @@ class ReteleElectriceHttpClient:
         self.username = username
         self.password = password
         self.account = account
-        self._logged_in = False
+        self._session = HttpSessionStateMachine()
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=base_url, transport=transport, timeout=timeout)
 
@@ -79,9 +89,34 @@ class ReteleElectriceHttpClient:
         if self._owns_client:
             await self._client.aclose()
 
+    @property
+    def session_state(self) -> SessionState:
+        return self._session.state
+
+    @property
+    def session_history(self) -> tuple[StateTransition, ...]:
+        return tuple(self._session.history)
+
     async def login(self) -> None:
-        response = await self._client.post(LOGIN_PATH, data={"username": self.username, "password": self.password})
-        self._validate_response(response, "Login")
+        if self._session.state in {
+            SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+            SessionState.ROUTE_BOOTSTRAPPED,
+            SessionState.AURA_READY,
+            SessionState.VISUALFORCE_READY,
+        }:
+            return
+
+        login_page = await self._client.get(LOGIN_PATH)
+        self._validate_status(login_page, "Login page")
+        login_fields = parse_visualforce_hidden_fields(login_page.text)
+        self._session.transition(SessionState.LOGIN_PAGE_FETCHED, note="login page fetched")
+
+        form_data = dict(login_fields.fields)
+        form_data.update({"username": self.username, "password": self.password})
+        response = await self._client.post(LOGIN_PATH, data=form_data)
+        self._validate_status(response, "Login")
+        self._session.transition(SessionState.CREDENTIALS_POSTED, note="credentials posted")
+
         payload = _json_or_none(response.text)
         if isinstance(payload, dict):
             if payload.get("success") is False or payload.get("authenticated") is False:
@@ -89,7 +124,10 @@ class ReteleElectriceHttpClient:
             if _dict_has_error(payload):
                 raise ReteleElectriceHttpSemanticError("Login response contains an error.")
             if payload.get("success") is True or payload.get("authenticated") is True or payload.get("sessionId"):
-                self._logged_in = True
+                self._session.transition(
+                    SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+                    note="frontdoor session established",
+                )
                 return
 
         normalized = _normalize_text(response.text)
@@ -98,20 +136,24 @@ class ReteleElectriceHttpClient:
         if any(marker in normalized for marker in ERROR_MARKERS):
             raise ReteleElectriceHttpSemanticError("Login response contains an error marker.")
         if "frontdoor.jsp" in normalized or "/s/" in normalized or "autentificare reusita" in normalized:
-            self._logged_in = True
+            self._session.transition(
+                SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+                note="frontdoor session established",
+            )
             return
         raise ReteleElectriceHttpSemanticError("Login response has an unrecognized shape.")
 
     async def list_pods(self) -> list[PodMetadata]:
-        await self._ensure_login()
+        await self._ensure_aura_ready()
         response = await self._client.post(AURA_PATH, data={"message": "listPods"})
-        self._validate_response(response, "POD discovery")
+        self._validate_aura_response(response, "POD discovery")
         return self.parse_aura_pod_discovery_response(response.text, account=self.account)
 
     async def get_meter_readings(self, pod: str, expected_date: date | None = None) -> list[MeterReading]:
-        await self._ensure_login()
-        response = await self._client.post(READINGS_PATH, data={"pod": pod})
-        self._validate_response(response, "meter readings")
+        form_data = await self._visualforce_form_payload(READINGS_PATH, "meter readings")
+        form_data["pod"] = pod
+        response = await self._client.post(READINGS_PATH, data=form_data)
+        self._validate_visualforce_response(response, "meter readings", success_marker=pod)
         return self.parse_visualforce_readings_table(
             response.text,
             pod=pod,
@@ -130,13 +172,24 @@ class ReteleElectriceHttpClient:
         code = ENERGY_CODE_BY_CHANNEL.get(channel)
         if code is None:
             raise UnsupportedEnergyChannelError(f"Energy channel {channel!r} is not implemented for HTTP curves.")
-        response = await self._client.post(CURVE_PATH, data={"pod": pod, "date": day.isoformat(), "measure": code})
-        self._validate_response(response, "load curve")
+        form_data = await self._visualforce_form_payload(CURVE_PATH, "load curve")
+        form_data.update({"pod": pod, "date": day.isoformat(), "measure": code})
+        response = await self._client.post(CURVE_PATH, data=form_data)
+        self._validate_visualforce_response(response, "load curve", success_marker="CurveDiCaricoGraph")
         return self.parse_curve_sample_values_response(response.text, pod=pod, account=self.account, expected_date=day)
 
     @staticmethod
     def parse_aura_pod_discovery_response(text: str, *, account: str = "default") -> list[PodMetadata]:
-        _reject_error_payload(text, "POD discovery")
+        validation = validate_aura_response(200, text)
+        if not validation.ok:
+            raise ReteleElectriceHttpSemanticError(
+                _aura_validation_message(
+                    "POD discovery",
+                    validation.status.value,
+                    validation.action_states,
+                    validation.errors,
+                )
+            )
         payload = _loads_portal_json(text, "POD discovery")
         records = list(_iter_pod_records(payload))
         if not records:
@@ -278,14 +331,108 @@ class ReteleElectriceHttpClient:
         return samples
 
     async def _ensure_login(self) -> None:
-        if not self._logged_in:
+        if self._session.state == SessionState.UNAUTHENTICATED:
             await self.login()
+        elif self._session.state == SessionState.EXPIRED_RELOGIN_REQUIRED:
+            await self.login()
+
+    async def _ensure_route_bootstrapped(self) -> None:
+        await self._ensure_login()
+        if self._session.state in {
+            SessionState.ROUTE_BOOTSTRAPPED,
+            SessionState.AURA_READY,
+            SessionState.VISUALFORCE_READY,
+        }:
+            return
+        self._session.require(SessionState.FRONTDOOR_SESSION_ESTABLISHED)
+        response = await self._client.get(ROUTE_PATH)
+        self._validate_response(response, "Route bootstrap")
+        self._session.transition(SessionState.ROUTE_BOOTSTRAPPED, note="route bootstrapped")
+
+    async def _ensure_aura_ready(self) -> None:
+        await self._ensure_route_bootstrapped()
+        if self._session.state == SessionState.AURA_READY:
+            return
+        if self._session.state == SessionState.VISUALFORCE_READY:
+            self._session.transition(SessionState.AURA_READY, note="aura ready")
+            return
+        self._session.require(SessionState.ROUTE_BOOTSTRAPPED)
+        self._session.transition(SessionState.AURA_READY, note="aura ready")
+
+    async def _ensure_visualforce_ready(self) -> None:
+        await self._ensure_route_bootstrapped()
+        if self._session.state == SessionState.VISUALFORCE_READY:
+            return
+        if self._session.state == SessionState.AURA_READY:
+            self._session.transition(SessionState.VISUALFORCE_READY, note="visualforce ready")
+            return
+        self._session.require(SessionState.ROUTE_BOOTSTRAPPED)
+        self._session.transition(SessionState.VISUALFORCE_READY, note="visualforce ready")
+
+    async def _visualforce_form_payload(self, path: str, label: str) -> dict[str, str]:
+        await self._ensure_visualforce_ready()
+        response = await self._client.get(path)
+        self._validate_status(response, f"{label} form")
+        hidden = parse_visualforce_hidden_fields(response.text)
+        if not hidden.view_state:
+            result = classify_visualforce_partial_response(response.text)
+            if result.status != VisualforcePartialStatus.PARTIAL_RENDER:
+                raise ReteleElectriceHttpSemanticError(
+                    f"{label} form Visualforce response is not usable: {result.status.value.replace('_', ' ')}."
+                )
+            _reject_error_payload(response.text, f"{label} form")
+            raise ReteleElectriceHttpSemanticError(f"{label} form is missing Visualforce ViewState.")
+        return dict(hidden.fields)
+
+    @staticmethod
+    def _validate_status(response: httpx.Response, label: str) -> None:
+        if response.status_code != 200:
+            raise ReteleElectriceHttpError(f"{label} request failed with HTTP {response.status_code}.")
 
     @staticmethod
     def _validate_response(response: httpx.Response, label: str) -> None:
-        if response.status_code != 200:
-            raise ReteleElectriceHttpError(f"{label} request failed with HTTP {response.status_code}.")
+        ReteleElectriceHttpClient._validate_status(response, label)
         _reject_error_payload(response.text, label)
+
+    def _validate_aura_response(self, response: httpx.Response, label: str) -> None:
+        validation = validate_aura_response(response.status_code, response.text)
+        if validation.ok:
+            return
+        if validation.status == AuraStatus.LOGIN_PAGE and self._session.state == SessionState.AURA_READY:
+            self._session.transition(SessionState.EXPIRED_RELOGIN_REQUIRED, note="aura returned login page")
+        if validation.status == AuraStatus.HTTP_ERROR:
+            raise ReteleElectriceHttpError(f"{label} request failed with {', '.join(validation.errors)}.")
+        raise ReteleElectriceHttpSemanticError(
+            _aura_validation_message(label, validation.status.value, validation.action_states, validation.errors)
+        )
+
+    def _validate_visualforce_response(
+        self,
+        response: httpx.Response,
+        label: str,
+        *,
+        success_marker: str | re.Pattern[str] | None = None,
+    ) -> None:
+        self._validate_status(response, label)
+        text = response.text
+        result = classify_visualforce_partial_response(text, success_marker=success_marker)
+        if result.ok:
+            return
+        if result.status == VisualforcePartialStatus.PARTIAL_RENDER and success_marker is None:
+            return
+        if result.status == VisualforcePartialStatus.LOGIN_PAGE and self._session.state == SessionState.VISUALFORCE_READY:
+            self._session.transition(
+                SessionState.EXPIRED_RELOGIN_REQUIRED,
+                note="visualforce returned login page",
+            )
+        if result.status != VisualforcePartialStatus.SEMANTIC_MARKER_MISSING:
+            raise ReteleElectriceHttpSemanticError(
+                f"{label} Visualforce response is not usable: {result.status.value.replace('_', ' ')}."
+            )
+        _reject_error_payload(text, label)
+        raise ReteleElectriceHttpSemanticError(
+            f"{label} Visualforce response is not usable: {result.status.value.replace('_', ' ')}."
+        )
 
 
 def _reject_error_payload(text: str, label: str) -> None:
@@ -330,6 +477,22 @@ def _dict_has_error(value: Any) -> bool:
     if isinstance(value, str):
         return any(marker in _normalize_text(value) for marker in ERROR_MARKERS)
     return False
+
+
+def _aura_validation_message(
+    label: str,
+    status: str,
+    action_states: tuple[str, ...] = (),
+    errors: tuple[str, ...] = (),
+) -> str:
+    parts = [f"{label} Aura response is not usable: {status.replace('_', ' ')}"]
+    if action_states:
+        parts.append(f"states={','.join(action_states)}")
+    if errors:
+        parts.append(f"errors={'; '.join(errors)}")
+    if len(parts) == 1:
+        return f"{parts[0]}."
+    return f"{parts[0]} ({'; '.join(parts[1:])})."
 
 
 def _iter_pod_records(value: Any) -> Iterable[dict[str, Any]]:

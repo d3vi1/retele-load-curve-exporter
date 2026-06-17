@@ -11,10 +11,12 @@ from dso_retele_electrice.http_client import (
     ENERGY_CODE_BY_CHANNEL,
     LOGIN_PATH,
     READINGS_PATH,
+    ROUTE_PATH,
     ReteleElectriceHttpClient,
     ReteleElectriceHttpSemanticError,
     UnsupportedEnergyChannelError,
 )
+from dso_retele_electrice.http_core import SessionState
 
 FIXTURES = Path(__file__).parent / "fixtures" / "retele_http_client"
 
@@ -25,11 +27,17 @@ def fixture(name: str) -> str:
 
 def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
     requested_paths: list[str] = []
+    posted_login_form: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requested_paths.append(request.url.path)
-        if request.url.path == LOGIN_PATH:
+        requested_paths.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            posted_login_form.update(httpx.QueryParams(request.content.decode()))
             return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
         if request.url.path == AURA_PATH:
             return httpx.Response(200, text=fixture("aura_pods_success.json"))
         raise AssertionError(f"unexpected request: {request.url}")
@@ -41,11 +49,28 @@ def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
             account="main",
             transport=httpx.MockTransport(handler),
         ) as client:
-            return await client.list_pods()
+            pods = await client.list_pods()
+            return pods, client.session_state, [item.to_state for item in client.session_history]
 
-    pods = asyncio.run(run())
+    pods, session_state, transitions = asyncio.run(run())
 
-    assert requested_paths == [LOGIN_PATH, AURA_PATH]
+    assert requested_paths == [
+        f"GET {LOGIN_PATH}",
+        f"POST {LOGIN_PATH}",
+        f"GET {ROUTE_PATH}",
+        f"POST {AURA_PATH}",
+    ]
+    assert posted_login_form["loginCsrf"] == "SANITIZED_LOGIN_CSRF"
+    assert posted_login_form["username"] == "sanitized-user"
+    assert posted_login_form["password"] == "sanitized-password"
+    assert session_state == SessionState.AURA_READY
+    assert transitions == [
+        SessionState.LOGIN_PAGE_FETCHED,
+        SessionState.CREDENTIALS_POSTED,
+        SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+        SessionState.ROUTE_BOOTSTRAPPED,
+        SessionState.AURA_READY,
+    ]
     assert [pod.pod for pod in pods] == ["RO001EXXXXXXXXX", "RO001EYYYYYYYYY"]
     assert pods[0].account == "main"
     assert pods[0].city == "REDACTED_CITY"
@@ -57,7 +82,12 @@ def test_login_rejects_http_200_error_payload():
         async with ReteleElectriceHttpClient(
             "sanitized-user",
             "sanitized-password",
-            transport=httpx.MockTransport(lambda _request: httpx.Response(200, text=fixture("login_error.json"))),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    text=fixture("login_page.html") if request.method == "GET" else fixture("login_error.json"),
+                )
+            ),
         ) as client:
             await client.login()
 
@@ -67,10 +97,24 @@ def test_login_rejects_http_200_error_payload():
 
 def test_aura_parser_rejects_login_page_and_wrong_shape():
     with pytest.raises(ReteleElectriceHttpSemanticError, match="login page"):
-        ReteleElectriceHttpClient.parse_aura_pod_discovery_response("<label>Utilizator</label><input><label>Parola</label>")
+        ReteleElectriceHttpClient.parse_aura_pod_discovery_response(
+            '<html><form action="/login"><input name="username"><input type="password" name="pw">AUTENTIFIC</form></html>'
+        )
 
     with pytest.raises(ReteleElectriceHttpSemanticError, match="no recognizable POD"):
         ReteleElectriceHttpClient.parse_aura_pod_discovery_response('{"actions":[{"state":"SUCCESS","returnValue":{}}]}')
+
+
+@pytest.mark.parametrize("state", ["INCOMPLETE", "ERROR"])
+def test_aura_parser_rejects_non_success_actions_even_with_pod_like_data(state):
+    body = (
+        'for(;;);{"actions":[{"state":"'
+        + state
+        + '","returnValue":{"pods":[{"pod":"RO001EXXXXXXXXX"}]},"error":[{"message":"sanitized failure"}]}]}'
+    )
+
+    with pytest.raises(ReteleElectriceHttpSemanticError, match=state):
+        ReteleElectriceHttpClient.parse_aura_pod_discovery_response(body)
 
 
 def test_parse_visualforce_readings_table_to_meter_readings():
@@ -169,13 +213,23 @@ def test_parse_curve_sample_values_rejects_wrong_pod_date_shape_and_unknown_chan
 
 
 def test_http_methods_parse_fixture_backed_readings_and_curves_without_browser():
+    submitted_visualforce_forms: list[dict[str, str]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == LOGIN_PATH:
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_success.json"))
-        if request.url.path == READINGS_PATH:
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path in {READINGS_PATH, CURVE_PATH}:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path == READINGS_PATH:
+            submitted_visualforce_forms.append(dict(httpx.QueryParams(request.content.decode())))
             return httpx.Response(200, text=fixture("readings_visualforce.html"))
-        if request.url.path == CURVE_PATH:
+        if request.method == "POST" and request.url.path == CURVE_PATH:
             form = dict(httpx.QueryParams(request.content.decode()))
+            submitted_visualforce_forms.append(form)
             assert form["measure"] == "WI"
             return httpx.Response(200, text=fixture("curve_samples_wi.json"))
         raise AssertionError(f"unexpected request: {request.url}")
@@ -189,9 +243,66 @@ def test_http_methods_parse_fixture_backed_readings_and_curves_without_browser()
         ) as client:
             readings = await client.get_meter_readings("RO001EXXXXXXXXX", expected_date=date(2026, 6, 1))
             samples = await client.get_load_curve_samples("RO001EXXXXXXXXX", date(2026, 6, 1))
-            return readings, samples
+            return readings, samples, client.session_state
 
-    readings, samples = asyncio.run(run())
+    readings, samples, session_state = asyncio.run(run())
 
     assert readings[0].channel == "active_import_zone_1"
     assert samples[0].channel == "active_import"
+    assert submitted_visualforce_forms[0]["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
+    assert submitted_visualforce_forms[0]["pod"] == "RO001EXXXXXXXXX"
+    assert submitted_visualforce_forms[1]["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
+    assert session_state == SessionState.VISUALFORCE_READY
+
+
+def test_visualforce_form_bootstrap_rejects_missing_viewstate():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path == READINGS_PATH:
+            return httpx.Response(200, text="<html><form><input type='hidden' name='apex.submit' value='1'></form></html>")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.get_meter_readings("RO001EXXXXXXXXX")
+
+    with pytest.raises(ReteleElectriceHttpSemanticError, match="ViewState"):
+        asyncio.run(run())
+
+
+def test_visualforce_post_rejects_login_page_masquerading_as_200():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path == READINGS_PATH:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path == READINGS_PATH:
+            return httpx.Response(
+                200,
+                text='<html><form action="/login"><input name="username"><input type="password" name="pw">AUTENTIFIC</form></html>',
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.get_meter_readings("RO001EXXXXXXXXX")
+
+    with pytest.raises(ReteleElectriceHttpSemanticError, match="login page"):
+        asyncio.run(run())
