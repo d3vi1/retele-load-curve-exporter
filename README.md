@@ -54,6 +54,9 @@ docker run --rm -p 9831:9831 \
   dso-load-curve-exporter:local
 ```
 
+Synology deployment evidence is recorded in
+[`docs/synology-acceptance.md`](docs/synology-acceptance.md).
+
 ## Observability
 
 Prometheus verification queries:

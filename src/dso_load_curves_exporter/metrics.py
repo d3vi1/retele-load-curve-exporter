@@ -18,6 +18,8 @@ class Snapshot:
         self.errors_total: int = 0
 
     def render(self) -> str:
+        readings = latest_readings(self.readings)
+        reading_constants = constants_by_pod(readings)
         lines = [
             "# HELP dso_exporter_last_attempt_timestamp_seconds Last scrape attempt timestamp.",
             "# TYPE dso_exporter_last_attempt_timestamp_seconds gauge",
@@ -38,7 +40,10 @@ class Snapshot:
             "# TYPE dso_load_curve_meter_info gauge",
         ]
         for meta in self.metadata.values():
-            lines.append(f"dso_load_curve_meter_info{{{label_text(meta_labels(meta))}}} 1")
+            labels = meta_labels(meta)
+            if not labels.get("constant"):
+                labels["constant"] = reading_constants.get((meta.account, meta.pod), "")
+            lines.append(f"dso_load_curve_meter_info{{{label_text(labels)}}} 1")
 
         lines.extend(
             [
@@ -52,7 +57,7 @@ class Snapshot:
                 "# TYPE dso_meter_reading_source_timestamp_seconds gauge",
             ]
         )
-        for reading in latest_readings(self.readings):
+        for reading in readings:
             meta = self.metadata.get((reading.account, reading.pod))
             labels = common_labels(meta, reading.account, reading.pod)
             labels.update(
@@ -93,6 +98,8 @@ class Snapshot:
         for curve in latest_curves(self.curves):
             meta = self.metadata.get((curve.account, curve.pod))
             labels = common_labels(meta, curve.account, curve.pod)
+            if not labels.get("constant"):
+                labels["constant"] = reading_constants.get((curve.account, curve.pod), "")
             labels.update(
                 {
                     "obis_code": curve.obis_code,
@@ -188,6 +195,14 @@ def latest_readings(readings: Iterable[MeterReading]) -> list[MeterReading]:
         if previous is None or reading.read_at > previous.read_at:
             latest[key] = reading
     return sorted(latest.values(), key=lambda item: (item.account, item.pod, item.channel, item.obis_code))
+
+
+def constants_by_pod(readings: Iterable[MeterReading]) -> dict[tuple[str, str], str]:
+    constants: dict[tuple[str, str], str] = {}
+    for reading in readings:
+        if reading.constant:
+            constants[(reading.account, reading.pod)] = reading.constant
+    return constants
 
 
 def latest_curves(curves: Iterable[LoadCurveSample]) -> list[LoadCurveSample]:

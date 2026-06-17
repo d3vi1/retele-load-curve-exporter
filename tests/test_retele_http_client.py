@@ -666,38 +666,38 @@ def test_parse_curve_sample_values_wi_to_active_import_samples():
     assert samples[0].pod == "RO001EXXXXXXXXX"
     assert samples[0].account == "main"
     assert samples[0].start_at.isoformat() == "2026-06-01T00:00:00+03:00"
-    assert samples[0].interval_seconds == 900
+    assert samples[0].interval_seconds == 3600
     assert samples[0].channel == "active_import"
     assert samples[0].obis_code == "1.8.0"
     assert samples[0].interval_value == 306.0
     assert samples[0].interval_unit == "Wh"
-    assert samples[0].average_value == 1224.0
+    assert samples[0].average_value == 306.0
     assert samples[0].average_unit == "W"
-    assert samples[1].start_at.isoformat() == "2026-06-01T00:15:00+03:00"
+    assert samples[1].start_at.isoformat() == "2026-06-01T01:00:00+03:00"
 
 
-def test_parse_curve_sample_values_export_and_reactive_channels():
-    export_samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
-        fixture("curve_samples_wi.json").replace('"WI"', '"WE"'),
-        pod="RO001EXXXXXXXXX",
-        account="main",
-        expected_date=date(2026, 6, 1),
-    )
-    reactive_samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
-        fixture("curve_samples_wi.json").replace('"WI"', '"QI"').replace('"unit": "kWh"', '"unit": "kvarh"'),
-        pod="RO001EXXXXXXXXX",
-        account="main",
-        expected_date=date(2026, 6, 1),
-    )
+def test_parse_real_sanitized_curve_sample_fixtures_for_all_channels():
+    cases = [
+        ("curve_samples_wi.json", "active_import", "1.8.0", "Wh", "W", 306.0, 306.0),
+        ("curve_samples_we.json", "active_export", "2.8.0", "Wh", "W", 84.0, 84.0),
+        ("curve_samples_qi.json", "reactive_inductive", "5.8.0", "varh", "var", 21.0, 21.0),
+        ("curve_samples_qe.json", "reactive_capacitive", "8.8.0", "varh", "var", 13.0, 13.0),
+    ]
 
-    assert export_samples[0].channel == "active_export"
-    assert export_samples[0].obis_code == "2.8.0"
-    assert export_samples[0].interval_unit == "Wh"
-    assert export_samples[0].average_unit == "W"
-    assert reactive_samples[0].channel == "reactive_inductive"
-    assert reactive_samples[0].obis_code == "5.8.0"
-    assert reactive_samples[0].interval_unit == "varh"
-    assert reactive_samples[0].average_unit == "var"
+    for filename, channel, obis_code, interval_unit, average_unit, interval_value, average_value in cases:
+        samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
+            fixture(filename),
+            pod="RO001EXXXXXXXXX",
+            account="main",
+            expected_date=date(2026, 6, 1),
+        )
+
+        assert samples[0].channel == channel
+        assert samples[0].obis_code == obis_code
+        assert samples[0].interval_unit == interval_unit
+        assert samples[0].average_unit == average_unit
+        assert samples[0].interval_value == interval_value
+        assert samples[0].average_value == average_value
 
 
 def test_parse_curve_sample_values_rejects_wrong_pod_date_shape_and_unknown_channel_code():
@@ -783,6 +783,67 @@ def test_http_methods_parse_fixture_backed_readings_and_curves_without_browser()
     assert submitted_visualforce_forms[1]["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
     assert submitted_visualforce_forms[1]["uniqueId"] == "RO001EXXXXXXXXX-20260601-WI"
     assert session_state == SessionState.VISUALFORCE_READY
+
+
+def test_http_load_curve_method_submits_and_parses_all_real_channel_codes_without_browser():
+    cases = [
+        ("active_import", "WI", "curve_samples_wi.json", "1.8.0", "Wh", "W"),
+        ("active_export", "WE", "curve_samples_we.json", "2.8.0", "Wh", "W"),
+        ("reactive_inductive", "QI", "curve_samples_qi.json", "5.8.0", "varh", "var"),
+        ("reactive_capacitive", "QE", "curve_samples_qe.json", "8.8.0", "varh", "var"),
+    ]
+    submitted_forms: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path == CURVE_PATH:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path == CURVE_PATH:
+            form = dict(httpx.QueryParams(request.content.decode()))
+            submitted_forms.append(form)
+            code = form["params"].split(",")[3]
+            fixture_by_code = {case[1]: case[2] for case in cases}
+            return httpx.Response(200, text=fixture(fixture_by_code[code]))
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            account="main",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            results = []
+            for channel, *_ in cases:
+                results.append(
+                    await client.get_load_curve_samples(
+                        "RO001EXXXXXXXXX",
+                        date(2026, 6, 1),
+                        channel=channel,
+                    )
+                )
+            return results
+
+    results = asyncio.run(run())
+
+    assert [form["methodN"] for form in submitted_forms] == ["ValoriDiEnergia"] * 4
+    assert [form["params"].split(",")[3] for form in submitted_forms] == ["WI", "WE", "QI", "QE"]
+    assert [form["uniqueId"] for form in submitted_forms] == [
+        "RO001EXXXXXXXXX-20260601-WI",
+        "RO001EXXXXXXXXX-20260601-WE",
+        "RO001EXXXXXXXXX-20260601-QI",
+        "RO001EXXXXXXXXX-20260601-QE",
+    ]
+    for samples, (channel, _code, _filename, obis_code, interval_unit, average_unit) in zip(results, cases):
+        assert samples[0].channel == channel
+        assert samples[0].obis_code == obis_code
+        assert samples[0].interval_unit == interval_unit
+        assert samples[0].average_unit == average_unit
 
 
 def test_meter_readings_accept_person_account_customer_code_key():

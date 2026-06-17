@@ -1,26 +1,26 @@
 {
   "status": "OK",
   "CurveDiCaricoGraph": {
-    "measure": "WI",
+    "measure": "QI",
     "sampleValues": [
       {
         "startAt": "2026-06-01T00:00:00+03:00",
-        "value": "0,306000",
-        "unit": "kWh",
+        "value": "0,021000",
+        "unit": "kvarh",
         "intervalSeconds": 3600,
         "date": "2026-06-01",
         "quarter": "Q1"
       },
       {
         "startAt": "2026-06-01T01:00:00+03:00",
-        "value": "0,125000",
-        "unit": "kWh",
+        "value": "0,011000",
+        "unit": "kvarh",
         "intervalSeconds": 3600,
         "date": "2026-06-01",
         "quarter": "Q2"
       }
     ],
     "pod": "RO001EXXXXXXXXX",
-    "unit": "kWh"
+    "unit": "kvarh"
   }
 }

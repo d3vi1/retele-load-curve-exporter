@@ -1,11 +1,11 @@
 {
   "status": "OK",
   "CurveDiCaricoGraph": {
-    "measure": "WI",
+    "measure": "WE",
     "sampleValues": [
       {
         "startAt": "2026-06-01T00:00:00+03:00",
-        "value": "0,306000",
+        "value": "0,084000",
         "unit": "kWh",
         "intervalSeconds": 3600,
         "date": "2026-06-01",
@@ -13,7 +13,7 @@
       },
       {
         "startAt": "2026-06-01T01:00:00+03:00",
-        "value": "0,125000",
+        "value": "0,042000",
         "unit": "kWh",
         "intervalSeconds": 3600,
         "date": "2026-06-01",

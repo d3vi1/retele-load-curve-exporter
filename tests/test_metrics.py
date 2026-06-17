@@ -170,3 +170,47 @@ def test_snapshot_renders_actual_curve_interval_duration():
 
     assert 'interval="PT1H"' in rendered
     assert 'interval="PT15M"' not in rendered
+
+
+def test_snapshot_fills_curve_constant_from_latest_reading_when_metadata_lacks_it():
+    snap = Snapshot()
+    snap.last_attempt = 1
+    snap.last_success = 2
+    meta = PodMetadata(pod="RO001EXXXXXXXXX", account="main", meter_serial="SERIAL")
+    snap.metadata = {("main", meta.pod): meta}
+    when = datetime(2026, 6, 1, tzinfo=ZoneInfo("Europe/Bucharest"))
+    snap.readings = [
+        MeterReading(
+            pod=meta.pod,
+            account="main",
+            read_at=when,
+            meter_serial="SERIAL",
+            constant="2000",
+            reading_type="real",
+            channel="active_import",
+            obis_code="1.8.0",
+            value=1,
+            unit="kWh",
+        )
+    ]
+    snap.curves = [
+        LoadCurveSample(
+            pod=meta.pod,
+            account="main",
+            start_at=when,
+            interval_seconds=3600,
+            channel="active_import",
+            obis_code="1.8.0",
+            interval_value=1,
+            interval_unit="Wh",
+            average_value=1,
+            average_unit="W",
+        )
+    ]
+
+    rendered = snap.render()
+
+    info_line = next(line for line in rendered.splitlines() if line.startswith("dso_load_curve_meter_info{"))
+    curve_line = next(line for line in rendered.splitlines() if line.startswith("dso_load_curve_interval_energy_wh{"))
+    assert 'constant="2000"' in info_line
+    assert 'constant="2000"' in curve_line
