@@ -11,7 +11,7 @@ services:
       EXPORTER_HOST: 0.0.0.0
       EXPORTER_PORT: "9831"
       EXPORTER_POLL_SECONDS: "${EXPORTER_POLL_SECONDS:-900}"
-      EXPORTER_HEADLESS: "true"
+      RETELE_ELECTRICE_RUNTIME: http
     ports:
       - "127.0.0.1:9831:9831/tcp"
     read_only: true
