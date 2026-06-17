@@ -1,0 +1,29 @@
+for(;;);
+{
+  "actions": [
+    {
+      "id": "1;a",
+      "state": "SUCCESS",
+      "returnValue": {
+        "pods": [
+          {
+            "pod": "RO001EXXXXXXXXX",
+            "city": "REDACTED_CITY",
+            "county": "REDACTED_COUNTY",
+            "approvedPowerKw": "42",
+            "distributionCompany": "Retele Electrice",
+            "address": "REDACTED_ADDRESS"
+          },
+          {
+            "pod": "RO001EYYYYYYYYY",
+            "city": "REDACTED_CITY",
+            "county": "REDACTED_COUNTY",
+            "approvedPowerKw": "18",
+            "distributionCompany": "Retele Electrice",
+            "address": "REDACTED_ADDRESS"
+          }
+        ]
+      }
+    }
+  ]
+}
