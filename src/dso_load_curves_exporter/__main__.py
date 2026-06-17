@@ -18,6 +18,25 @@ SNAPSHOT = Snapshot()
 LOCK = threading.Lock()
 
 
+class PartialSnapshotError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        metadata: list[PodMetadata],
+        readings: list[MeterReading],
+        curves: list[LoadCurveSample],
+        replace_readings: bool,
+        replace_curves: bool,
+    ) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+        self.readings = readings
+        self.curves = curves
+        self.replace_readings = replace_readings
+        self.replace_curves = replace_curves
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("EXPORTER_HOST", "0.0.0.0"))
@@ -74,6 +93,23 @@ async def poll_once(config: Config) -> None:
                 f"readings={len(account_readings)} curves={len(account_curves)}",
                 flush=True,
             )
+        except PartialSnapshotError as exc:
+            last_error = f"{account.name}: {exc}"
+            cycle_errors.append(last_error)
+            with LOCK:
+                _publish_account_snapshot(
+                    account.name,
+                    exc.metadata,
+                    exc.readings,
+                    exc.curves,
+                    replace_readings=exc.replace_readings,
+                    replace_curves=exc.replace_curves,
+                    mark_success=False,
+                )
+                SNAPSHOT.last_attempt = now
+                SNAPSHOT.last_error = last_error
+                SNAPSHOT.errors_total += 1
+            print(f"poll degraded account={account.name}: {exc}", flush=True)
         except Exception as exc:
             last_error = f"{account.name}: {exc}"
             cycle_errors.append(last_error)
@@ -142,6 +178,8 @@ async def _fetch_configured_pods_http_snapshot(
     data_attempts = 0
     data_successes = 0
     metadata_successes = 0
+    reading_successes = 0
+    curve_successes = 0
     data_errors: list[str] = []
     curve_day = datetime.now(BUCHAREST).date()
 
@@ -157,6 +195,7 @@ async def _fetch_configured_pods_http_snapshot(
             data_attempts += 1
             readings.extend(await client.get_meter_readings(pod.pod))  # type: ignore[attr-defined]
             data_successes += 1
+            reading_successes += 1
         except Exception as exc:
             data_errors.append(f"{pod.pod} readings: {exc}")
             print(f"poll warning account={account} pod={pod.pod} readings failed: {exc}", flush=True)
@@ -165,6 +204,7 @@ async def _fetch_configured_pods_http_snapshot(
             data_attempts += 1
             curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))  # type: ignore[attr-defined]
             data_successes += 1
+            curve_successes += 1
         except Exception as exc:
             data_errors.append(f"{pod.pod} curves: {exc}")
             print(f"poll warning account={account} pod={pod.pod} curves failed: {exc}", flush=True)
@@ -176,6 +216,18 @@ async def _fetch_configured_pods_http_snapshot(
         if len(data_errors) > 4:
             details += f"; ... {len(data_errors) - 4} more"
         raise RuntimeError(f"All configured POD fetches failed for account {account}: {details}")
+    if data_attempts and data_errors:
+        details = "; ".join(data_errors[:4])
+        if len(data_errors) > 4:
+            details += f"; ... {len(data_errors) - 4} more"
+        raise PartialSnapshotError(
+            f"Configured POD snapshot degraded for account {account}: {details}",
+            metadata=metadata,
+            readings=readings,
+            curves=curves,
+            replace_readings=reading_successes > 0,
+            replace_curves=curve_successes > 0,
+        )
 
     return metadata, readings, curves
 
@@ -212,15 +264,22 @@ def _publish_account_snapshot(
     metadata: list[PodMetadata],
     readings: list[MeterReading],
     curves: list[LoadCurveSample],
+    *,
+    replace_readings: bool = True,
+    replace_curves: bool = True,
+    mark_success: bool = True,
 ) -> None:
     for key in [key for key in SNAPSHOT.metadata if key[0] == account]:
         del SNAPSHOT.metadata[key]
     SNAPSHOT.metadata.update({(item.account, item.pod): item for item in metadata})
-    SNAPSHOT.readings = [item for item in SNAPSHOT.readings if item.account != account]
-    SNAPSHOT.readings.extend(readings)
-    SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
-    SNAPSHOT.curves.extend(curves)
-    SNAPSHOT.last_success = time.time()
+    if replace_readings:
+        SNAPSHOT.readings = [item for item in SNAPSHOT.readings if item.account != account]
+        SNAPSHOT.readings.extend(readings)
+    if replace_curves:
+        SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
+        SNAPSHOT.curves.extend(curves)
+    if mark_success:
+        SNAPSHOT.last_success = time.time()
 
 
 def only_pods_for_account(config: Config, account: str) -> set[str] | None:

@@ -95,6 +95,36 @@ def test_poll_once_keeps_cycle_error_when_later_account_succeeds(monkeypatch):
     asyncio.run(run())
 
 
+def test_poll_once_preserves_last_good_dynamic_data_on_partial_snapshot(monkeypatch):
+    async def run() -> None:
+        async def fetch_account_snapshot(runtime, account, *_args, **_kwargs):
+            assert runtime == "http"
+            raise exporter.PartialSnapshotError(
+                "configured POD snapshot degraded",
+                metadata=[_metadata("main", "RO001")],
+                readings=[],
+                curves=[],
+                replace_readings=False,
+                replace_curves=False,
+            )
+
+        snap = Snapshot()
+        snap.metadata = {("main", "RO001"): _metadata("main", "RO001")}
+        snap.readings = [_reading("main", "RO001")]
+        monkeypatch.setattr(exporter, "SNAPSHOT", snap)
+        monkeypatch.setattr(exporter, "fetch_account_snapshot", fetch_account_snapshot)
+
+        await exporter.poll_once(_config("main"))
+
+        assert ("main", "RO001") in exporter.SNAPSHOT.metadata
+        assert exporter.SNAPSHOT.readings == snap.readings
+        assert exporter.SNAPSHOT.last_success == 0
+        assert exporter.SNAPSHOT.last_error == "main: configured POD snapshot degraded"
+        assert exporter.SNAPSHOT.errors_total == 1
+
+    asyncio.run(run())
+
+
 def test_default_config_runtime_is_http_and_browser_client_is_not_imported(monkeypatch):
     monkeypatch.setenv("RETELE_ELECTRICE_USERNAME", "user")
     monkeypatch.setenv("RETELE_ELECTRICE_PASSWORD", "pass")

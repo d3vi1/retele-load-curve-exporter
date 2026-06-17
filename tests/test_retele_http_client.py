@@ -311,7 +311,11 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
             only_pods={"RO001EXXXXXXXXX", "RO001EYYYYYYYYY"},
         )
 
-    metadata, readings, curves = asyncio.run(run())
+    with pytest.raises(exporter.PartialSnapshotError) as exc_info:
+        asyncio.run(run())
+    metadata = exc_info.value.metadata
+    readings = exc_info.value.readings
+    curves = exc_info.value.curves
 
     assert f"POST {AURA_PATH}" not in requested_paths
     assert [item.pod for item in metadata] == ["RO001EXXXXXXXXX", "RO001EYYYYYYYYY"]
@@ -320,6 +324,8 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
     assert metadata[1].supplier == ""
     assert [item.pod for item in readings] == ["RO001EXXXXXXXXX", "RO001EXXXXXXXXX"]
     assert curves == []
+    assert exc_info.value.replace_readings is True
+    assert exc_info.value.replace_curves is False
 
 
 def test_http_configured_pods_raise_when_every_data_fetch_fails(monkeypatch):
@@ -400,12 +406,15 @@ def test_http_configured_pods_publish_metadata_when_all_data_fetches_fail(monkey
             only_pods={"RO001EXXXXXXXXX"},
         )
 
-    metadata, readings, curves = asyncio.run(run())
+    with pytest.raises(exporter.PartialSnapshotError) as exc_info:
+        asyncio.run(run())
 
-    assert len(metadata) == 1
-    assert metadata[0].supplier == "SANITIZED_SUPPLIER"
-    assert readings == []
-    assert curves == []
+    assert len(exc_info.value.metadata) == 1
+    assert exc_info.value.metadata[0].supplier == "SANITIZED_SUPPLIER"
+    assert exc_info.value.readings == []
+    assert exc_info.value.curves == []
+    assert exc_info.value.replace_readings is False
+    assert exc_info.value.replace_curves is False
 
 
 def test_parse_visualforce_readings_table_to_meter_readings():
