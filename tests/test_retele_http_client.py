@@ -77,6 +77,43 @@ def test_login_and_list_pods_use_httpx_transport_and_parse_aura_response():
     assert pods[0].approved_power_kw == "42"
 
 
+def test_login_follows_javascript_frontdoor_redirect_before_marking_session_established():
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page_visualforce_prefixed.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_frontdoor_js_redirect.html"))
+        if request.method == "GET" and request.url.path == "/secur/frontdoor.jsp":
+            assert request.url.params["sid"] == "SANITIZED_SESSION_ID"
+            return httpx.Response(302, headers={"Location": ROUTE_PATH, "Set-Cookie": "sid=SANITIZED_SESSION_ID"})
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.login()
+            return client.session_state, [item.note for item in client.session_history]
+
+    session_state, notes = asyncio.run(run())
+
+    assert requested_paths == [
+        f"GET {LOGIN_PATH}",
+        f"POST {LOGIN_PATH}",
+        "GET /secur/frontdoor.jsp",
+        f"GET {ROUTE_PATH}",
+    ]
+    assert session_state == SessionState.FRONTDOOR_SESSION_ESTABLISHED
+    assert all("SANITIZED_SESSION_ID" not in note for note in notes)
+
+
 def test_login_rejects_http_200_error_payload():
     async def run():
         async with ReteleElectriceHttpClient(

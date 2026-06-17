@@ -6,9 +6,10 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from html import unescape
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -118,6 +119,17 @@ class ReteleElectriceHttpClient:
         self._validate_status(response, "Login")
         self._session.transition(SessionState.CREDENTIALS_POSTED, note="credentials posted")
 
+        frontdoor_url = _frontdoor_redirect_url(response.text, str(response.url))
+        if frontdoor_url:
+            frontdoor_response = await self._client.get(frontdoor_url, follow_redirects=True)
+            self._validate_status(frontdoor_response, "Frontdoor redirect")
+            _reject_login_payload(frontdoor_response.text, "Frontdoor redirect")
+            self._session.transition(
+                SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+                note="frontdoor session established",
+            )
+            return
+
         payload = _json_or_none(response.text)
         if isinstance(payload, dict):
             if payload.get("success") is False or payload.get("authenticated") is False:
@@ -137,8 +149,7 @@ class ReteleElectriceHttpClient:
         if any(marker in normalized for marker in ERROR_MARKERS):
             raise ReteleElectriceHttpSemanticError("Login response contains an error marker.")
         if (
-            "frontdoor.jsp" in normalized
-            or "/s/" in normalized
+            "/s/" in normalized
             or "autentificare reusita" in normalized
             or _followed_login_redirect(response)
         ):
@@ -352,7 +363,8 @@ class ReteleElectriceHttpClient:
             return
         self._session.require(SessionState.FRONTDOOR_SESSION_ESTABLISHED)
         response = await self._client.get(ROUTE_PATH)
-        self._validate_response(response, "Route bootstrap")
+        self._validate_status(response, "Route bootstrap")
+        _reject_login_payload(response.text, "Route bootstrap")
         self._session.transition(SessionState.ROUTE_BOOTSTRAPPED, note="route bootstrapped")
 
     async def _ensure_aura_ready(self) -> None:
@@ -449,6 +461,12 @@ def _reject_error_payload(text: str, label: str) -> None:
         raise ReteleElectriceHttpSemanticError(f"{label} response contains an error marker.")
 
 
+def _reject_login_payload(text: str, label: str) -> None:
+    normalized = _normalize_text(text)
+    if "utilizator" in normalized and "parola" in normalized:
+        raise ReteleElectriceHttpSemanticError(f"{label} response is a login page.")
+
+
 def _loads_portal_json(text: str, label: str) -> Any:
     stripped = text.strip()
     if stripped.startswith("for(;;);"):
@@ -489,6 +507,29 @@ def _followed_login_redirect(response: httpx.Response) -> bool:
     if not response.history:
         return False
     return any(item.status_code in {301, 302, 303, 307, 308} for item in response.history)
+
+
+def _frontdoor_redirect_url(text: str, page_url: str) -> str:
+    body = unescape((text or "").replace("\\/", "/"))
+    pattern = re.compile(
+        r"""(?P<quote>["'])(?P<url>(?:https?://[^"']+)?/?secur/frontdoor\.jsp\?[^"']*?\bsid=[^"']+)(?P=quote)""",
+        re.I,
+    )
+    page = urlparse(page_url)
+    for match in pattern.finditer(body):
+        raw_url = match.group("url")
+        if raw_url.startswith("secur/"):
+            raw_url = "/" + raw_url
+        target = urljoin(page_url, raw_url)
+        parsed = urlparse(target)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if parsed.netloc != page.netloc:
+            continue
+        if parsed.path != "/secur/frontdoor.jsp":
+            continue
+        return target
+    return ""
 
 
 @dataclass(frozen=True)
