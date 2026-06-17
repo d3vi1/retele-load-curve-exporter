@@ -21,6 +21,7 @@ class Config:
     port: int
     poll_seconds: int
     headless: bool
+    load_curve_lookback_days: int
 
 
 def load_config() -> Config:
@@ -53,6 +54,7 @@ def load_config() -> Config:
         port=int(os.getenv("EXPORTER_PORT", "9831")),
         poll_seconds=int(os.getenv("EXPORTER_POLL_SECONDS", "900")),
         headless=os.getenv("EXPORTER_HEADLESS", "true").lower() not in {"0", "false", "no"},
+        load_curve_lookback_days=max(1, int(os.getenv("RETELE_ELECTRICE_LOAD_CURVE_LOOKBACK_DAYS", "7"))),
     )
 
 

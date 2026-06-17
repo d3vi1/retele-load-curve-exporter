@@ -54,6 +54,7 @@ def main() -> None:
         port=args.port,
         poll_seconds=config.poll_seconds,
         headless=config.headless,
+        load_curve_lookback_days=config.load_curve_lookback_days,
     )
     worker = threading.Thread(target=lambda: asyncio.run(poll_loop(config)), daemon=True)
     worker.start()
@@ -84,6 +85,7 @@ async def poll_once(config: Config) -> None:
                 account.password,
                 only_pods=only_pods_for_account(config, account.name),
                 headless=config.headless,
+                load_curve_lookback_days=config.load_curve_lookback_days,
             )
             with LOCK:
                 _publish_account_snapshot(account.name, account_meta, account_readings, account_curves)
@@ -106,7 +108,7 @@ async def poll_once(config: Config) -> None:
                     exc.curves,
                     replace_readings=exc.replace_readings,
                     replace_curves=exc.replace_curves,
-                    mark_success=False,
+                    mark_success=bool(exc.readings or exc.curves),
                 )
                 SNAPSHOT.last_attempt = now
                 SNAPSHOT.last_error = last_error
@@ -129,9 +131,16 @@ async def fetch_account_snapshot(
     password: str,
     only_pods: set[str] | None = None,
     headless: bool = True,
+    load_curve_lookback_days: int = 7,
 ) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
     if runtime == "http":
-        return await _fetch_account_snapshot_http(account, username, password, only_pods=only_pods)
+        return await _fetch_account_snapshot_http(
+            account,
+            username,
+            password,
+            only_pods=only_pods,
+            load_curve_lookback_days=load_curve_lookback_days,
+        )
     if runtime == "browser":
         return await _fetch_account_snapshot_browser(
             account,
@@ -149,21 +158,34 @@ async def _fetch_account_snapshot_http(
     password: str,
     *,
     only_pods: set[str] | None = None,
+    load_curve_lookback_days: int = 7,
 ) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
     from dso_retele_electrice.http_client import ReteleElectriceHttpClient
 
     async with ReteleElectriceHttpClient(username, password, account=account) as client:
         if only_pods:
-            return await _fetch_configured_pods_http_snapshot(client, account, only_pods)
+            return await _fetch_configured_pods_http_snapshot(
+                client,
+                account,
+                only_pods,
+                load_curve_lookback_days=load_curve_lookback_days,
+            )
 
         pods = await client.list_pods()
-        return await _fetch_configured_pods_http_snapshot(client, account, {pod.pod for pod in pods})
+        return await _fetch_configured_pods_http_snapshot(
+            client,
+            account,
+            {pod.pod for pod in pods},
+            load_curve_lookback_days=load_curve_lookback_days,
+        )
 
 
 async def _fetch_configured_pods_http_snapshot(
     client: DistributorClient,
     account: str,
     only_pods: set[str],
+    *,
+    load_curve_lookback_days: int = 7,
 ) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
     pods = [PodMetadata(pod=pod, account=account) for pod in sorted(only_pods)]
     metadata: list[PodMetadata] = []
@@ -197,7 +219,15 @@ async def _fetch_configured_pods_http_snapshot(
         for channel in LOAD_CURVE_CHANNELS:
             try:
                 data_attempts += 1
-                curves.extend(await client.get_load_curve_samples(pod.pod, curve_day, channel=channel))
+                curves.extend(
+                    await _get_load_curve_samples_with_lookback(
+                        client,
+                        pod.pod,
+                        curve_day,
+                        channel=channel,
+                        lookback_days=load_curve_lookback_days,
+                    )
+                )
                 data_successes += 1
                 curve_successes += 1
             except Exception as exc:
@@ -225,6 +255,34 @@ async def _fetch_configured_pods_http_snapshot(
         )
 
     return metadata, readings, curves
+
+
+async def _get_load_curve_samples_with_lookback(
+    client: DistributorClient,
+    pod: str,
+    start_day,
+    *,
+    channel: str,
+    lookback_days: int,
+) -> list[LoadCurveSample]:
+    errors: list[str] = []
+    for offset in range(max(1, lookback_days)):
+        day = start_day - timedelta(days=offset)
+        try:
+            return await client.get_load_curve_samples(pod, day, channel=channel)
+        except Exception as exc:
+            if not _is_missing_load_curve_day(exc):
+                raise
+            errors.append(f"{day.isoformat()}: {exc}")
+    details = "; ".join(errors[:3])
+    if len(errors) > 3:
+        details += f"; ... {len(errors) - 3} more"
+    raise RuntimeError(f"Load-curve response has no samples in the last {max(1, lookback_days)} days: {details}")
+
+
+def _is_missing_load_curve_day(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return "no samples for the requested date" in message
 
 
 async def _fetch_account_snapshot_browser(

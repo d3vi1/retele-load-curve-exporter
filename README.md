@@ -24,6 +24,7 @@ export RETELE_ELECTRICE_RUNTIME=http
 export RETELE_ELECTRICE_MAIN_USERNAME='user@example.com'
 export RETELE_ELECTRICE_MAIN_PASSWORD='secret'
 export RETELE_ELECTRICE_ONLY_PODS='RO001EXXXXXXXXX,RO001EYYYYYYYYY'
+export RETELE_ELECTRICE_LOAD_CURVE_LOOKBACK_DAYS=7
 python -m dso_load_curves_exporter --host 0.0.0.0 --port 9831
 ```
 
@@ -65,6 +66,12 @@ count(dso_meter_reading_active_energy_kwh)
 count(dso_meter_reading_export_active_energy_kwh)
 count(dso_meter_reading_reactive_energy_kvarh)
 ```
+
+Load curves are requested from the most recent expected portal day first. If the
+portal has not published that day yet, the exporter walks back up to
+`RETELE_ELECTRICE_LOAD_CURVE_LOOKBACK_DAYS` days and publishes the latest
+available day while marking the scrape degraded when any configured account or
+channel still fails.
 
 ## Notes
 

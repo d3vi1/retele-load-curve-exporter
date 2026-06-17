@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import dso_load_curves_exporter.__main__ as exporter
 from dso_load_curves_exporter.config import Account, Config
 from dso_load_curves_exporter.metrics import Snapshot
-from dso_retele_electrice.models import MeterReading, PodMetadata
+from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
 
 
 def test_poll_once_sets_last_attempt_before_first_fetch_returns(monkeypatch):
@@ -120,6 +120,32 @@ def test_poll_once_preserves_last_good_dynamic_data_on_partial_snapshot(monkeypa
         assert exporter.SNAPSHOT.readings == snap.readings
         assert exporter.SNAPSHOT.last_success == 0
         assert exporter.SNAPSHOT.last_error == "main: configured POD snapshot degraded"
+        assert exporter.SNAPSHOT.errors_total == 1
+
+    asyncio.run(run())
+
+
+def test_poll_once_marks_partial_snapshot_success_when_readings_are_fresh(monkeypatch):
+    async def run() -> None:
+        async def fetch_account_snapshot(runtime, account, *_args, **_kwargs):
+            assert runtime == "http"
+            raise exporter.PartialSnapshotError(
+                "configured POD snapshot degraded",
+                metadata=[_metadata("main", "RO001")],
+                readings=[_reading("main", "RO001")],
+                curves=[],
+                replace_readings=True,
+                replace_curves=False,
+            )
+
+        monkeypatch.setattr(exporter, "SNAPSHOT", Snapshot())
+        monkeypatch.setattr(exporter, "fetch_account_snapshot", fetch_account_snapshot)
+
+        await exporter.poll_once(_config("main"))
+
+        assert exporter.SNAPSHOT.last_success > 0
+        assert exporter.SNAPSHOT.last_error == "main: configured POD snapshot degraded"
+        assert exporter.SNAPSHOT.readings
         assert exporter.SNAPSHOT.errors_total == 1
 
     asyncio.run(run())
@@ -234,6 +260,46 @@ def test_poll_once_passes_http_runtime_by_default(monkeypatch):
     asyncio.run(run())
 
 
+def test_load_curve_fetch_looks_back_when_latest_day_has_no_samples():
+    class Client:
+        def __init__(self):
+            self.days = []
+
+        async def get_load_curve_samples(self, pod, day, *, channel="active_import"):
+            self.days.append(day.isoformat())
+            if len(self.days) == 1:
+                raise RuntimeError("Load-curve response has no samples for the requested date.")
+            return [
+                LoadCurveSample(
+                    pod=pod,
+                    account="main",
+                    start_at=datetime(2026, 6, 16, tzinfo=ZoneInfo("Europe/Bucharest")),
+                    interval_seconds=3600,
+                    channel=channel,
+                    obis_code="1.8.0",
+                    interval_value=1,
+                    interval_unit="Wh",
+                    average_value=1,
+                    average_unit="W",
+                )
+            ]
+
+    async def run() -> None:
+        client = Client()
+        samples = await exporter._get_load_curve_samples_with_lookback(
+            client,
+            "RO001",
+            datetime(2026, 6, 17).date(),
+            channel="active_import",
+            lookback_days=3,
+        )
+
+        assert [sample.pod for sample in samples] == ["RO001"]
+        assert client.days == ["2026-06-17", "2026-06-16"]
+
+    asyncio.run(run())
+
+
 def _config(*accounts: str) -> Config:
     return Config(
         accounts=[Account(name=account, username="user", password="pass") for account in accounts],
@@ -244,6 +310,7 @@ def _config(*accounts: str) -> Config:
         port=0,
         poll_seconds=900,
         headless=True,
+        load_curve_lookback_days=7,
     )
 
 
