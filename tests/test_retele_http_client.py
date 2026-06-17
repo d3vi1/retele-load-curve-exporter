@@ -95,6 +95,57 @@ def test_login_rejects_http_200_error_payload():
         asyncio.run(run())
 
 
+def test_login_posts_visualforce_prefixed_fields_and_follows_frontdoor_redirect():
+    requested_paths: list[str] = []
+    posted_login_form: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page_visualforce_prefixed.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            posted_login_form.update(httpx.QueryParams(request.content.decode()))
+            return httpx.Response(302, headers={"Location": "/secur/frontdoor.jsp?sid=SANITIZED_SESSION_ID"})
+        if request.method == "GET" and request.url.path == "/secur/frontdoor.jsp":
+            return httpx.Response(302, headers={"Location": ROUTE_PATH})
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.login()
+            return client.session_state, [item.to_state for item in client.session_history]
+
+    session_state, transitions = asyncio.run(run())
+
+    assert requested_paths == [
+        f"GET {LOGIN_PATH}",
+        f"POST {LOGIN_PATH}",
+        "GET /secur/frontdoor.jsp",
+        f"GET {ROUTE_PATH}",
+    ]
+    assert posted_login_form["loginPage:loginForm"] == "loginPage:loginForm"
+    assert posted_login_form["loginPage:loginForm:j_id25"] == "loginPage:loginForm:j_id25"
+    assert posted_login_form["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
+    assert posted_login_form["com.salesforce.visualforce.ViewStateVersion"] == "SANITIZED_VIEWSTATE_VERSION"
+    assert posted_login_form["com.salesforce.visualforce.ViewStateMAC"] == "SANITIZED_VIEWSTATE_MAC"
+    assert posted_login_form["loginPage:loginForm:username"] == "sanitized-user"
+    assert posted_login_form["loginPage:loginForm:password"] == "sanitized-password"
+    assert "username" not in posted_login_form
+    assert "password" not in posted_login_form
+    assert session_state == SessionState.FRONTDOOR_SESSION_ESTABLISHED
+    assert transitions == [
+        SessionState.LOGIN_PAGE_FETCHED,
+        SessionState.CREDENTIALS_POSTED,
+        SessionState.FRONTDOOR_SESSION_ESTABLISHED,
+    ]
+
+
 def test_aura_parser_rejects_login_page_and_wrong_shape():
     with pytest.raises(ReteleElectriceHttpSemanticError, match="login page"):
         ReteleElectriceHttpClient.parse_aura_pod_discovery_response(

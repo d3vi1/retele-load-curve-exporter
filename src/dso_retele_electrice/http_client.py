@@ -4,9 +4,11 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -108,12 +110,11 @@ class ReteleElectriceHttpClient:
 
         login_page = await self._client.get(LOGIN_PATH)
         self._validate_status(login_page, "Login page")
-        login_fields = parse_visualforce_hidden_fields(login_page.text)
+        login_form = _parse_login_form(login_page.text, str(login_page.url))
         self._session.transition(SessionState.LOGIN_PAGE_FETCHED, note="login page fetched")
 
-        form_data = dict(login_fields.fields)
-        form_data.update({"username": self.username, "password": self.password})
-        response = await self._client.post(LOGIN_PATH, data=form_data)
+        form_data = login_form.payload(username=self.username, password=self.password)
+        response = await self._client.post(login_form.action_url, data=form_data, follow_redirects=True)
         self._validate_status(response, "Login")
         self._session.transition(SessionState.CREDENTIALS_POSTED, note="credentials posted")
 
@@ -135,7 +136,12 @@ class ReteleElectriceHttpClient:
             raise ReteleElectriceHttpSemanticError("Login response is still the login form.")
         if any(marker in normalized for marker in ERROR_MARKERS):
             raise ReteleElectriceHttpSemanticError("Login response contains an error marker.")
-        if "frontdoor.jsp" in normalized or "/s/" in normalized or "autentificare reusita" in normalized:
+        if (
+            "frontdoor.jsp" in normalized
+            or "/s/" in normalized
+            or "autentificare reusita" in normalized
+            or _followed_login_redirect(response)
+        ):
             self._session.transition(
                 SessionState.FRONTDOOR_SESSION_ESTABLISHED,
                 note="frontdoor session established",
@@ -477,6 +483,186 @@ def _dict_has_error(value: Any) -> bool:
     if isinstance(value, str):
         return any(marker in _normalize_text(value) for marker in ERROR_MARKERS)
     return False
+
+
+def _followed_login_redirect(response: httpx.Response) -> bool:
+    if not response.history:
+        return False
+    return any(item.status_code in {301, 302, 303, 307, 308} for item in response.history)
+
+
+@dataclass(frozen=True)
+class _FormControl:
+    tag: str
+    name: str
+    control_type: str
+    value: str
+
+
+@dataclass(frozen=True)
+class _LoginForm:
+    action_url: str
+    hidden_fields: dict[str, str]
+    controls: tuple[_FormControl, ...]
+    username_field: str
+    password_field: str
+    jsfcljs_fields: dict[str, str]
+
+    def payload(self, *, username: str, password: str) -> dict[str, str]:
+        data: dict[str, str] = dict(self.hidden_fields)
+        for control in self.controls:
+            if not control.name:
+                continue
+            if control.control_type == "hidden":
+                data[control.name] = control.value
+        data.update(self.jsfcljs_fields)
+        data[self.username_field] = username
+        data[self.password_field] = password
+
+        submit = next(
+            (
+                control
+                for control in self.controls
+                if control.name
+                and (
+                    (control.tag == "input" and control.control_type in {"submit", "image"})
+                    or (control.tag == "button" and control.control_type in {"", "submit"})
+                )
+            ),
+            None,
+        )
+        if submit is not None and submit.name not in data:
+            data[submit.name] = submit.value
+        return data
+
+
+@dataclass(frozen=True)
+class _HtmlForm:
+    form_name: str
+    action_url: str
+    controls: tuple[_FormControl, ...]
+
+
+class _FormParser(HTMLParser):
+    def __init__(self, page_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.page_url = page_url
+        self.forms: list[_HtmlForm] = []
+        self.jsfcljs_fields_by_form: dict[str, dict[str, str]] = {}
+        self._current_form_name: str | None = None
+        self._current_action_url: str | None = None
+        self._current_controls: list[_FormControl] | None = None
+        self._script_data: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        attr_map = {name.casefold(): value or "" for name, value in attrs}
+        if tag == "script":
+            self._script_data = []
+            return
+        if tag == "form":
+            self._current_form_name = attr_map.get("name") or attr_map.get("id") or ""
+            self._current_action_url = urljoin(self.page_url, attr_map.get("action") or LOGIN_PATH)
+            self._current_controls = []
+            return
+        if self._current_controls is None or tag not in {"input", "button"}:
+            return
+        name = attr_map.get("name") or attr_map.get("id") or ""
+        control_type = attr_map.get("type", "text").casefold()
+        self._current_controls.append(
+            _FormControl(tag=tag, name=name, control_type=control_type, value=attr_map.get("value", ""))
+        )
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag == "script" and self._script_data is not None:
+            self._add_jsfcljs_fields("".join(self._script_data))
+            self._script_data = None
+            return
+        if tag != "form" or self._current_controls is None or self._current_action_url is None:
+            return
+        self.forms.append(
+            _HtmlForm(self._current_form_name or "", self._current_action_url, tuple(self._current_controls))
+        )
+        self._current_form_name = None
+        self._current_action_url = None
+        self._current_controls = None
+
+    def handle_data(self, data: str) -> None:
+        if self._script_data is not None:
+            self._script_data.append(data)
+
+    def _add_jsfcljs_fields(self, script: str) -> None:
+        for form_name, fields in _parse_jsfcljs_fields(script).items():
+            self.jsfcljs_fields_by_form.setdefault(form_name, {}).update(fields)
+
+
+def _parse_login_form(html: str, page_url: str) -> _LoginForm:
+    parser = _FormParser(page_url)
+    parser.feed(html or "")
+    hidden_fields = dict(parse_visualforce_hidden_fields(html).fields)
+    forms = parser.forms
+    if not forms:
+        controls = tuple(
+            _FormControl(tag="input", name=name, control_type="hidden", value=value)
+            for name, value in hidden_fields.items()
+        )
+        forms = [_HtmlForm("", urljoin(page_url, LOGIN_PATH), controls)]
+
+    for form in forms:
+        password_field = _password_field_name(form.controls)
+        if not password_field:
+            continue
+        username_field = _username_field_name(form.controls, password_field)
+        if username_field:
+            return _LoginForm(
+                action_url=form.action_url,
+                hidden_fields=hidden_fields,
+                controls=form.controls,
+                username_field=username_field,
+                password_field=password_field,
+                jsfcljs_fields=parser.jsfcljs_fields_by_form.get(form.form_name, {}),
+            )
+    raise ReteleElectriceHttpSemanticError("Login page has no usable username/password form.")
+
+
+def _parse_jsfcljs_fields(script: str) -> dict[str, dict[str, str]]:
+    fields_by_form: dict[str, dict[str, str]] = {}
+    pattern = re.compile(
+        r"jsfcljs\(\s*document\.forms\[(?P<form_quote>['\"])(?P<form>.*?)(?P=form_quote)\]\s*,\s*"
+        r"(?P<pvp_quote>['\"])(?P<pvp>.*?)(?P=pvp_quote)",
+        re.S,
+    )
+    for match in pattern.finditer(script or ""):
+        pairs = [item for item in match.group("pvp").split(",") if item]
+        fields: dict[str, str] = {}
+        for index in range(0, len(pairs) - 1, 2):
+            fields[pairs[index]] = pairs[index + 1]
+        if fields:
+            fields_by_form.setdefault(match.group("form"), {}).update(fields)
+    return fields_by_form
+
+
+def _password_field_name(controls: tuple[_FormControl, ...]) -> str:
+    for control in controls:
+        if control.name and control.control_type == "password":
+            return control.name
+    return ""
+
+
+def _username_field_name(controls: tuple[_FormControl, ...], password_field: str) -> str:
+    candidates = [
+        control.name
+        for control in controls
+        if control.name
+        and control.name != password_field
+        and control.control_type in {"", "text", "email", "search", "tel"}
+    ]
+    for name in candidates:
+        normalized = _normalize_key(name)
+        if any(token in normalized for token in ("username", "user", "email", "utilizator", "login")):
+            return name
+    return candidates[0] if candidates else ""
 
 
 def _aura_validation_message(

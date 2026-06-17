@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ro">
+  <body>
+    <form id="loginPage:loginForm" action="/PEDRO_SiteLogin" method="post">
+      <input type="hidden" name="loginPage:loginForm" value="loginPage:loginForm">
+      <label for="loginPage:loginForm:username">Utilizator</label>
+      <input id="loginPage:loginForm:username" name="loginPage:loginForm:username" type="text">
+      <label for="loginPage:loginForm:password">Parola</label>
+      <input id="loginPage:loginForm:password" name="loginPage:loginForm:password" type="password" value="">
+      <a class="slds-button slds-button_neutral button-white" onclick="logintest()" value="Autentificare">Autentificare</a>
+    </form>
+    <script>
+      function logintest(){
+        logincall();
+      }
+      function logincall() {
+        if(typeof jsfcljs == 'function'){
+          jsfcljs(document.forms['loginPage:loginForm'],'loginPage:loginForm:j_id25,loginPage:loginForm:j_id25','');
+        }
+        return false;
+      }
+    </script>
+    <span id="loginPage:loginForm:j_id__v">
+      <input type="hidden" id="com.salesforce.visualforce.ViewState" name="com.salesforce.visualforce.ViewState" value="SANITIZED_VIEWSTATE">
+      <input type="hidden" id="com.salesforce.visualforce.ViewStateVersion" name="com.salesforce.visualforce.ViewStateVersion" value="SANITIZED_VIEWSTATE_VERSION">
+      <input type="hidden" id="com.salesforce.visualforce.ViewStateMAC" name="com.salesforce.visualforce.ViewStateMAC" value="SANITIZED_VIEWSTATE_MAC">
+    </span>
+  </body>
+</html>
