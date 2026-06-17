@@ -110,7 +110,7 @@ class ReteleElectriceClient:
 
     async def get_pod_metadata(self, pod: str) -> PodMetadata:
         await self._goto(f"{BASE_URL}{POD_INFO_PATH}?pod={pod}")
-        await self._page.wait_for_function("(pod) => document.body && document.body.innerText.includes(pod)", pod)
+        await self._page.wait_for_function("(pod) => document.body && document.body.innerText.includes(pod)", arg=pod)
         await self._page.wait_for_timeout(1500)
         fields = await self._extract_label_values()
         atr_number, atr_date = split_atr_cer(self._pick(fields, "Nr. si dara ATR/CER", "Nr. si data ATR/CER"))
@@ -221,7 +221,7 @@ class ReteleElectriceClient:
 
     async def _download_current_load_curve(self, pod: str, channel: str) -> str:
         await self._goto(f"{BASE_URL}{LOAD_CURVES_PATH}?pod={pod}")
-        await self._page.wait_for_function("(pod) => document.body && document.body.innerText.includes(pod)", pod)
+        await self._page.wait_for_function("(pod) => document.body && document.body.innerText.includes(pod)", arg=pod)
         await self._page.wait_for_timeout(1000)
         selects = self._page.locator("select")
         count = await selects.count()
@@ -239,13 +239,15 @@ class ReteleElectriceClient:
                 ENERGY_LABELS[channel],
             )
         )
-        await self._page.get_by_role("button", name=re.compile("Filtru", re.I)).click()
+        await self._page.get_by_role("button", name=re.compile(r"^CAUT[ĂA]$", re.I)).click()
+        download_button = self._page.get_by_role(
+            "button", name=re.compile(r"Desc.rcare curba la granularitate maxim[ăa] disponibil[ăa]$", re.I)
+        )
+        await download_button.wait_for(state="visible")
         await self._page.wait_for_timeout(1200)
         with TemporaryDirectory() as tmp:
             async with self._page.expect_download(timeout=20_000) as download_info:
-                await self._page.get_by_role(
-                    "button", name=re.compile("Desc.rcare curba la granularitate maxima disponibila$", re.I)
-                ).click()
+                await download_button.click()
             download = await download_info.value
             target = Path(tmp) / download.suggested_filename
             await download.save_as(target)
