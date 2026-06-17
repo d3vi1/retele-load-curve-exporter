@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from dso_common import DistributorClient
 from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
 from dso_retele_electrice.parsing import BUCHAREST
 
@@ -16,6 +17,7 @@ from .metrics import Snapshot
 
 SNAPSHOT = Snapshot()
 LOCK = threading.Lock()
+LOAD_CURVE_CHANNELS = ("active_import", "active_export", "reactive_inductive", "reactive_capacitive")
 
 
 class PartialSnapshotError(RuntimeError):
@@ -159,7 +161,7 @@ async def _fetch_account_snapshot_http(
 
 
 async def _fetch_configured_pods_http_snapshot(
-    client: object,
+    client: DistributorClient,
     account: str,
     only_pods: set[str],
 ) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
@@ -177,7 +179,7 @@ async def _fetch_configured_pods_http_snapshot(
 
     for pod in pods:
         try:
-            metadata.append(await client.get_pod_metadata(pod.pod))  # type: ignore[attr-defined]
+            metadata.append(await client.get_pod_metadata(pod.pod))
             metadata_successes += 1
         except Exception as exc:
             metadata.append(pod)
@@ -185,21 +187,22 @@ async def _fetch_configured_pods_http_snapshot(
 
         try:
             data_attempts += 1
-            readings.extend(await client.get_meter_readings(pod.pod))  # type: ignore[attr-defined]
+            readings.extend(await client.get_meter_readings(pod.pod))
             data_successes += 1
             reading_successes += 1
         except Exception as exc:
             data_errors.append(f"{pod.pod} readings: {exc}")
             print(f"poll warning account={account} pod={pod.pod} readings failed: {exc}", flush=True)
 
-        try:
-            data_attempts += 1
-            curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))  # type: ignore[attr-defined]
-            data_successes += 1
-            curve_successes += 1
-        except Exception as exc:
-            data_errors.append(f"{pod.pod} curves: {exc}")
-            print(f"poll warning account={account} pod={pod.pod} curves failed: {exc}", flush=True)
+        for channel in LOAD_CURVE_CHANNELS:
+            try:
+                data_attempts += 1
+                curves.extend(await client.get_load_curve_samples(pod.pod, curve_day, channel=channel))
+                data_successes += 1
+                curve_successes += 1
+            except Exception as exc:
+                data_errors.append(f"{pod.pod} curves {channel}: {exc}")
+                print(f"poll warning account={account} pod={pod.pod} curves {channel} failed: {exc}", flush=True)
 
         await asyncio.sleep(0.2)
 

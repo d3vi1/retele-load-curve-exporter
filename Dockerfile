@@ -1,9 +1,9 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -c constraints.txt .
 RUN addgroup --system exporter && adduser --system --ingroup exporter --home /nonexistent --no-create-home exporter
 
 ENV EXPORTER_HOST=0.0.0.0

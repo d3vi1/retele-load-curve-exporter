@@ -34,4 +34,4 @@ services:
 networks:
   prometheus-tancabesti:
     external: true
-    name: prometheus-tancabesti_default
+    name: "${PROMETHEUS_NETWORK:-prometheus_default}"

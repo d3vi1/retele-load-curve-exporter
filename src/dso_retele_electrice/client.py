@@ -184,13 +184,10 @@ class ReteleElectriceClient:
         channels = list(channels or ENERGY_LABELS.keys())
         samples: list[LoadCurveSample] = []
         for channel in channels:
-            try:
-                csv_text = await self._download_current_load_curve(pod, channel)
-            except Exception:
-                continue
+            csv_text = await self._download_current_load_curve(pod, channel)
             parsed = parse_load_curve_csv(csv_text)
             if not parsed:
-                continue
+                raise ValueError(f"Load-curve CSV has no parseable rows for channel {channel!r}.")
             start_at, _q, raw_k = max(parsed, key=lambda item: item[0])
             interval_seconds = 900
             if channel.startswith("reactive_"):
@@ -330,7 +327,7 @@ class ReteleElectriceClient:
             return "reactive_capacitive", OBIS_BY_CHANNEL["reactive_capacitive"], "kvarh"
         if "reactiva inductiva" in normalized:
             return "reactive_inductive", OBIS_BY_CHANNEL["reactive_inductive"], "kvarh"
-        return "unknown", "", ""
+        raise ValueError(f"Unsupported meter reading column: {title!r}.")
 
 
 async def fetch_account_snapshot(

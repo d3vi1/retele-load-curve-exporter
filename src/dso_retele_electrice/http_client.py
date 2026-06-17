@@ -37,6 +37,9 @@ CURVE_PATH = "/PED_ProxyCallWSAsync_Curve_VF"
 
 ENERGY_CODE_BY_CHANNEL = {
     "active_import": "WI",
+    "active_export": "WE",
+    "reactive_inductive": "QI",
+    "reactive_capacitive": "QE",
 }
 CHANNEL_BY_ENERGY_CODE = {code: channel for channel, code in ENERGY_CODE_BY_CHANNEL.items()}
 READING_CHANNEL_BY_PORTAL_CODE = {
@@ -457,7 +460,7 @@ class ReteleElectriceHttpClient:
                 continue
             value = _sample_value(row)
             unit = _pick(row, "unit", "unitOfMeasure", "uom") or _pick(graph, "unit", "unitOfMeasure", "uom") or "kWh"
-            interval_value, interval_unit = _active_import_interval(value, unit)
+            interval_value, interval_unit, average_unit = _curve_interval(channel, value, unit)
             interval_seconds = _sample_interval_seconds(row)
             samples.append(
                 LoadCurveSample(
@@ -470,7 +473,7 @@ class ReteleElectriceHttpClient:
                     interval_value=interval_value,
                     interval_unit=interval_unit,
                     average_value=interval_value * 3600.0 / interval_seconds,
-                    average_unit="W",
+                    average_unit=average_unit,
                 )
             )
 
@@ -1187,7 +1190,7 @@ def _curve_graph_from_daily_rows(rows: list[Any]) -> dict[str, Any]:
                 {
                     "startAt": (day_start + timedelta(hours=index)).isoformat(),
                     "value": value,
-                    "unit": "kWh",
+                    "unit": _curve_unit_for_energy_code(measure),
                     "intervalSeconds": 3600,
                 }
             )
@@ -1285,13 +1288,26 @@ def _sample_interval_seconds(row: dict[str, Any]) -> int:
     return 900
 
 
-def _active_import_interval(value: float, unit: str) -> tuple[float, str]:
+def _curve_interval(channel: str, value: float, unit: str) -> tuple[float, str, str]:
     normalized = _normalize_text(unit)
-    if normalized == "wh":
-        return value, "Wh"
-    if normalized in {"kwh", ""}:
-        return value * 1000.0, "Wh"
-    raise ReteleElectriceHttpSemanticError(f"Unsupported active_import curve unit: {unit!r}.")
+    if channel in {"active_import", "active_export"}:
+        if normalized == "wh":
+            return value, "Wh", "W"
+        if normalized in {"kwh", ""}:
+            return value * 1000.0, "Wh", "W"
+    if channel in {"reactive_inductive", "reactive_capacitive"}:
+        if normalized in {"varh", "var"}:
+            return value, "varh", "var"
+        if normalized in {"kvarh", "kvar", "kwh", ""}:
+            return value * 1000.0, "varh", "var"
+    raise ReteleElectriceHttpSemanticError(f"Unsupported {channel} curve unit: {unit!r}.")
+
+
+def _curve_unit_for_energy_code(code: str) -> str:
+    channel = CHANNEL_BY_ENERGY_CODE.get(str(code or "").upper())
+    if channel in {"reactive_inductive", "reactive_capacitive"}:
+        return "kvarh"
+    return "kWh"
 
 
 def _month_bounds(day: date) -> tuple[datetime, datetime]:

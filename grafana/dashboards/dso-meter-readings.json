@@ -11,7 +11,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus-tancabesti"
+        "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -50,7 +50,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus-tancabesti"
+        "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -89,7 +89,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus-tancabesti"
+        "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -128,7 +128,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus-tancabesti"
+        "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -161,7 +161,6 @@
   "refresh": "5m",
   "schemaVersion": 42,
   "tags": [
-    "tancabesti",
     "dso",
     "retele-electrice"
   ],
@@ -173,7 +172,7 @@
     "to": "now"
   },
   "timezone": "browser",
-  "title": "Tancabesti DSO Meter Readings",
-  "uid": "tancabesti-dso-meter-readings",
+  "title": "DSO Meter Readings",
+  "uid": "dso-meter-readings",
   "version": 1
 }

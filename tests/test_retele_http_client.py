@@ -648,7 +648,12 @@ def test_parse_visualforce_readings_rejects_wrong_pod_date_and_shape():
 
 
 def test_parse_curve_sample_values_wi_to_active_import_samples():
-    assert ENERGY_CODE_BY_CHANNEL == {"active_import": "WI"}
+    assert ENERGY_CODE_BY_CHANNEL == {
+        "active_import": "WI",
+        "active_export": "WE",
+        "reactive_inductive": "QI",
+        "reactive_capacitive": "QE",
+    }
 
     samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
         fixture("curve_samples_wi.json"),
@@ -669,6 +674,30 @@ def test_parse_curve_sample_values_wi_to_active_import_samples():
     assert samples[0].average_value == 1224.0
     assert samples[0].average_unit == "W"
     assert samples[1].start_at.isoformat() == "2026-06-01T00:15:00+03:00"
+
+
+def test_parse_curve_sample_values_export_and_reactive_channels():
+    export_samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
+        fixture("curve_samples_wi.json").replace('"WI"', '"WE"'),
+        pod="RO001EXXXXXXXXX",
+        account="main",
+        expected_date=date(2026, 6, 1),
+    )
+    reactive_samples = ReteleElectriceHttpClient.parse_curve_sample_values_response(
+        fixture("curve_samples_wi.json").replace('"WI"', '"QI"').replace('"unit": "kWh"', '"unit": "kvarh"'),
+        pod="RO001EXXXXXXXXX",
+        account="main",
+        expected_date=date(2026, 6, 1),
+    )
+
+    assert export_samples[0].channel == "active_export"
+    assert export_samples[0].obis_code == "2.8.0"
+    assert export_samples[0].interval_unit == "Wh"
+    assert export_samples[0].average_unit == "W"
+    assert reactive_samples[0].channel == "reactive_inductive"
+    assert reactive_samples[0].obis_code == "5.8.0"
+    assert reactive_samples[0].interval_unit == "varh"
+    assert reactive_samples[0].average_unit == "var"
 
 
 def test_parse_curve_sample_values_rejects_wrong_pod_date_shape_and_unknown_channel_code():
