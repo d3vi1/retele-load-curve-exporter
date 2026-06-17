@@ -74,16 +74,26 @@ Message actions:
 
 ## Current Blocker
 
-The direct HTTP client can complete Visualforce login and establish the Salesforce
-frontdoor session. It can also load the Lightning shell. However, direct Aura calls
-need a session-specific server-signed Aura token. Copying a token captured from a
-browser session into a separate HTTP login session returns an Aura error rather than
-POD records.
+Resolved for the direct HTTP client: after Visualforce login and Salesforce
+frontdoor session establishment, the client can load the Lightning shell and parse
+the `/s/sfsites/l/{urlencoded JSON context}/bootstrap.js?...` URL from
+`/s/new-load-curves-client`.
 
-Remaining R&D:
+The successful direct bootstrap sequence is:
 
-1. Identify the exact server response or Aura bootstrap operation that creates
-   `$AuraClientService.token$siteforce:communityApp`.
-2. Reproduce that bootstrap in the Python HTTP client for the same cookie/session jar.
-3. Use the confirmed POD discovery message above.
+1. Keep the shell/bootstrap-URL context as the outgoing `aura.context`.
+2. POST `aura://ComponentController/ACTION$getApplication` to
+   `/s/sfsites/aura?r=0&aura.Component.getApplication=1` with:
+   - `aura.context` set to the shell context;
+   - `aura.pageURI` set to `/s/new-load-curves-client`;
+   - `aura.token` set to `undefined`.
+3. Store the top-level `token` returned by getApplication.
+4. Use that token with the original shell context for POD discovery.
 
+Important live-probe finding: getApplication also returns a top-level `context`,
+but using that returned/extended context for POD discovery caused HTTP 400. Using
+the returned token with the original shell/bootstrap-URL context succeeded: POD
+discovery returned HTTP 200 with Aura actions `SUCCESS` / `SUCCESS` and sanitized
+POD-shaped records. The implementation therefore keeps response contexts separate
+from the outgoing request context until a future response context is proven
+compatible.

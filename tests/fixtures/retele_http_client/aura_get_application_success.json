@@ -1,0 +1,26 @@
+for(;;);
+{
+  "token": "SANITIZED_AURA_TOKEN_BOOTSTRAP",
+  "context": {
+    "mode": "PROD",
+    "fwuid": "SANITIZED_RETURNED_FWUID_DO_NOT_USE",
+    "app": "siteforce:communityApp",
+    "loaded": {
+      "APPLICATION@markup://siteforce:communityApp": "SANITIZED_RETURNED_APP_HASH"
+    },
+    "dn": [],
+    "globals": {},
+    "uad": false
+  },
+  "actions": [
+    {
+      "id": "1;a",
+      "state": "ERROR",
+      "error": [
+        {
+          "message": "Sanitized application bootstrap warning."
+        }
+      ]
+    }
+  ]
+}

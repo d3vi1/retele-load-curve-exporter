@@ -5,7 +5,7 @@ import asyncio
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
@@ -155,15 +155,7 @@ async def _fetch_account_snapshot_http(
             return await _fetch_configured_pods_http_snapshot(client, account, only_pods)
 
         pods = await client.list_pods()
-
-        readings: list[MeterReading] = []
-        curves: list[LoadCurveSample] = []
-        curve_day = datetime.now(BUCHAREST).date()
-        for pod in pods:
-            readings.extend(await client.get_meter_readings(pod.pod))
-            curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))
-            await asyncio.sleep(0.2)
-        return pods, readings, curves
+        return await _fetch_configured_pods_http_snapshot(client, account, {pod.pod for pod in pods})
 
 
 async def _fetch_configured_pods_http_snapshot(
@@ -181,7 +173,7 @@ async def _fetch_configured_pods_http_snapshot(
     reading_successes = 0
     curve_successes = 0
     data_errors: list[str] = []
-    curve_day = datetime.now(BUCHAREST).date()
+    curve_day = datetime.now(BUCHAREST).date() - timedelta(days=1)
 
     for pod in pods:
         try:

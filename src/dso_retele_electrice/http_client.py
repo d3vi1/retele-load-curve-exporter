@@ -5,11 +5,11 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -28,6 +28,7 @@ from .parsing import BUCHAREST, OBIS_BY_CHANNEL, decimal_ro, parse_ro_date, spli
 BASE_URL = "https://contulmeu.reteleelectrice.ro"
 LOGIN_PATH = "/PEDRO_SiteLogin"
 ROUTE_PATH = "/s/"
+LOAD_CURVES_PATH = "/s/new-load-curves-client"
 AURA_PATH = "/s/sfsites/aura"
 POD_INFO_PATH = "/s/new-pod-info-client"
 READINGS_PATH = "/PED_ProxyCallWSAsynSingleSelf_VF"
@@ -82,6 +83,10 @@ class ReteleElectriceHttpClient:
         self._session = HttpSessionStateMachine()
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=base_url, transport=transport, timeout=timeout)
+        self._aura_page_uri = LOAD_CURVES_PATH
+        self._aura_context: dict[str, Any] = {}
+        self._aura_token = ""
+        self._aura_returned_context: dict[str, Any] = {}
 
     async def __aenter__(self) -> "ReteleElectriceHttpClient":
         return self
@@ -170,17 +175,23 @@ class ReteleElectriceHttpClient:
                 "other.PED_Search_My_POD_.getNumPOD": "1",
                 "other.PED_Search_My_POD_.searchDBVisualizzaFornitura": "1",
             },
-            data={"message": json.dumps(_pod_discovery_aura_message(), separators=(",", ":"))},
+            data=self._aura_form(_pod_discovery_aura_message()),
         )
         self._validate_aura_response(response, "POD discovery")
+        self._update_aura_state_from_response(response.text, "POD discovery")
         return self.parse_aura_pod_discovery_response(response.text, account=self.account)
 
     async def get_pod_metadata(self, pod: str) -> PodMetadata:
-        await self._ensure_login()
-        response = await self._client.get(POD_INFO_PATH, params={"pod": pod})
-        self._validate_status(response, "POD metadata")
-        _reject_login_payload(response.text, "POD metadata")
-        return self.parse_pod_metadata_response(response.text, pod=pod, account=self.account)
+        try:
+            await self._ensure_login()
+            response = await self._client.get(POD_INFO_PATH, params={"pod": pod})
+            self._validate_status(response, "POD metadata")
+            _reject_login_payload(response.text, "POD metadata")
+            return self.parse_pod_metadata_response(response.text, pod=pod, account=self.account)
+        except ReteleElectriceHttpSemanticError:
+            pass
+        record = await self._get_single_pod_record(pod)
+        return self.parse_single_pod_record(record, pod=pod, account=self.account)
 
     async def get_meter_readings(self, pod: str, expected_date: date | None = None) -> list[MeterReading]:
         form_data = await self._visualforce_form_payload(READINGS_PATH, "meter readings")
@@ -206,9 +217,19 @@ class ReteleElectriceHttpClient:
         if code is None:
             raise UnsupportedEnergyChannelError(f"Energy channel {channel!r} is not implemented for HTTP curves.")
         form_data = await self._visualforce_form_payload(CURVE_PATH, "load curve")
-        form_data.update({"pod": pod, "date": day.isoformat(), "measure": code})
+        start, end = _month_bounds(day)
+        form_data.update(
+            {
+                "AJAXREQUEST": "_viewRoot",
+                "j_id0:j_id2": "j_id0:j_id2",
+                "j_id0:j_id2:j_id3": "j_id0:j_id2:j_id3",
+                "methodN": "ValoriDiEnergia",
+                "params": f"{start:%d/%m/%Y %H:%M:%S},{end:%d/%m/%Y %H:%M:%S},{pod},{code},",
+                "uniqueId": f"{pod}-{day:%Y%m%d}-{code}",
+            }
+        )
         response = await self._client.post(CURVE_PATH, data=form_data)
-        self._validate_visualforce_response(response, "load curve", success_marker="CurveDiCaricoGraph")
+        self._validate_status(response, "load curve")
         return self.parse_curve_sample_values_response(response.text, pod=pod, account=self.account, expected_date=day)
 
     @staticmethod
@@ -286,6 +307,42 @@ class ReteleElectriceHttpClient:
         )
 
     @staticmethod
+    def parse_single_pod_record(record: dict[str, Any], *, pod: str, account: str = "default") -> PodMetadata:
+        response_pod = _pick(record, "Name", "POD__c", "pod")
+        if response_pod and response_pod != pod:
+            raise ReteleElectriceHttpSemanticError("POD metadata response belongs to a different POD.")
+        street = " ".join(
+            item
+            for item in (
+                _pick(record, "Placename__c"),
+                _pick(record, "Description_Street__c"),
+                _pick(record, "House_Number__c"),
+                _pick(record, "City__c"),
+                _pick(record, "County__c"),
+            )
+            if item
+        )
+        meter_serial = _pick(record, "EA_METER_SERIE__c", "ER_METER_SERIE__c")
+        return PodMetadata(
+            pod=pod,
+            account=account,
+            distribution_company=_pick(record, "DistributionCompany__c"),
+            city=_pick(record, "City__c"),
+            county=_pick(record, "County__c"),
+            address=street,
+            approved_power_kw=_pick(record, "Absorbed_Power_KW__c"),
+            voltage_level=_pick(record, "Nominal_Voltage_POD__c"),
+            delimitation_voltage=_pick(record, "Nominal_Voltage_POD__c"),
+            meter_status=_pick(record, "Power_Status__c", "Contract_State__c"),
+            meter_serial=meter_serial,
+            smartmeter_id=meter_serial,
+            meter_brand=_pick(record, "EA_METER_TYPE__c", "ER_METER_TYPE__c"),
+            meter_type=_pick(record, "EA_METER_TYPE__c", "ER_METER_TYPE__c"),
+            constant=_pick(record, "EA_CONSTANT__c"),
+            extra={str(k): str(v) for k, v in record.items() if isinstance(v, str | int | float | bool)},
+        )
+
+    @staticmethod
     def parse_visualforce_readings_table(
         html: str,
         *,
@@ -348,8 +405,7 @@ class ReteleElectriceHttpClient:
         account: str = "default",
         expected_date: date | None = None,
     ) -> list[LoadCurveSample]:
-        _reject_error_payload(text, "load curve")
-        payload = _loads_portal_json(text, "load curve")
+        payload = _load_curve_payload(text)
         graph = _find_curve_graph(payload)
         if graph is None:
             raise ReteleElectriceHttpSemanticError("Load-curve response has no CurveDiCaricoGraph payload.")
@@ -397,6 +453,32 @@ class ReteleElectriceHttpClient:
             raise ReteleElectriceHttpSemanticError("Load-curve response has no samples for the requested date.")
         return samples
 
+    async def _get_single_pod_record(self, pod: str) -> dict[str, Any]:
+        await self._ensure_aura_ready()
+        message = {
+            "actions": [
+                {
+                    "id": "1;a",
+                    "descriptor": "apex://PED_Search_My_POD_Controller/ACTION$getSinglePOD",
+                    "callingDescriptor": "markup://c:PED_SearchPOD_Functionality",
+                    "params": {"podId": pod},
+                }
+            ]
+        }
+        response = await self._client.post(
+            AURA_PATH,
+            params={"r": "6", "other.PED_Search_My_POD_.getSinglePOD": "1"},
+            data=self._aura_form(message),
+        )
+        self._validate_aura_response(response, "POD metadata")
+        self._update_aura_state_from_response(response.text, "POD metadata")
+        payload = _loads_portal_json(response.text, "POD metadata")
+        for action in payload.get("actions", []) if isinstance(payload, dict) else []:
+            value = action.get("returnValue")
+            if isinstance(value, dict):
+                return value
+        raise ReteleElectriceHttpSemanticError("POD metadata response has no POD record.")
+
     async def _ensure_login(self) -> None:
         if self._session.state == SessionState.UNAUTHENTICATED:
             await self.login()
@@ -418,14 +500,39 @@ class ReteleElectriceHttpClient:
         self._session.transition(SessionState.ROUTE_BOOTSTRAPPED, note="route bootstrapped")
 
     async def _ensure_aura_ready(self) -> None:
-        await self._ensure_route_bootstrapped()
-        if self._session.state == SessionState.AURA_READY:
+        await self._ensure_login()
+        if self._session.state == SessionState.AURA_READY and self._aura_context and self._aura_token:
             return
-        if self._session.state == SessionState.VISUALFORCE_READY:
+        if not self._aura_context:
+            await self._bootstrap_aura_shell()
+        if not self._aura_token:
+            await self._bootstrap_aura_application()
+        if not self._aura_token:
+            raise ReteleElectriceHttpSemanticError("Aura bootstrap response did not provide a token.")
+        if self._session.state != SessionState.AURA_READY:
+            if self._session.state not in {SessionState.ROUTE_BOOTSTRAPPED, SessionState.VISUALFORCE_READY}:
+                self._session.require(SessionState.ROUTE_BOOTSTRAPPED)
             self._session.transition(SessionState.AURA_READY, note="aura ready")
-            return
-        self._session.require(SessionState.ROUTE_BOOTSTRAPPED)
-        self._session.transition(SessionState.AURA_READY, note="aura ready")
+
+    async def _bootstrap_aura_shell(self) -> None:
+        response = await self._client.get(LOAD_CURVES_PATH)
+        self._validate_status(response, "Aura shell bootstrap")
+        _reject_login_payload(response.text, "Aura shell bootstrap")
+        page_uri, context = _parse_aura_shell_bootstrap(response.text, str(response.url))
+        self._aura_page_uri = page_uri
+        self._aura_context = context
+        if self._session.state == SessionState.FRONTDOOR_SESSION_ESTABLISHED:
+            self._session.transition(SessionState.ROUTE_BOOTSTRAPPED, note="aura shell bootstrapped")
+
+    async def _bootstrap_aura_application(self) -> None:
+        response = await self._client.post(
+            AURA_PATH,
+            params={"r": "0", "aura.Component.getApplication": "1"},
+            data=self._aura_form(_get_application_aura_message(), token="undefined"),
+        )
+        self._validate_status(response, "Aura application bootstrap")
+        _reject_login_payload(response.text, "Aura application bootstrap")
+        self._update_aura_token_from_response(response.text, "Aura application bootstrap")
 
     async def _ensure_visualforce_ready(self) -> None:
         await self._ensure_route_bootstrapped()
@@ -451,6 +558,35 @@ class ReteleElectriceHttpClient:
             _reject_error_payload(response.text, f"{label} form")
             raise ReteleElectriceHttpSemanticError(f"{label} form is missing Visualforce ViewState.")
         return dict(hidden.fields)
+
+    def _aura_form(self, message: dict[str, Any], *, token: str | None = None) -> dict[str, str]:
+        if not self._aura_context:
+            raise ReteleElectriceHttpSemanticError("Aura request context is not initialized.")
+        return {
+            "message": json.dumps(message, separators=(",", ":")),
+            "aura.context": json.dumps(self._aura_context, separators=(",", ":")),
+            "aura.pageURI": self._aura_page_uri or LOAD_CURVES_PATH,
+            "aura.token": token if token is not None else self._aura_token or "undefined",
+        }
+
+    def _update_aura_state_from_response(self, text: str, label: str) -> None:
+        payload = _loads_portal_json(text, label)
+        if not isinstance(payload, dict):
+            return
+        self._update_aura_token_from_payload(payload)
+        context = payload.get("context")
+        if isinstance(context, dict):
+            self._aura_returned_context = context
+
+    def _update_aura_token_from_response(self, text: str, label: str) -> None:
+        payload = _loads_portal_json(text, label)
+        if isinstance(payload, dict):
+            self._update_aura_token_from_payload(payload)
+
+    def _update_aura_token_from_payload(self, payload: dict[str, Any]) -> None:
+        token = payload.get("token")
+        if isinstance(token, str) and token and token != "undefined":
+            self._aura_token = token
 
     @staticmethod
     def _validate_status(response: httpx.Response, label: str) -> None:
@@ -580,6 +716,45 @@ def _frontdoor_redirect_url(text: str, page_url: str) -> str:
             continue
         return target
     return ""
+
+
+def _parse_aura_shell_bootstrap(html: str, page_url: str) -> tuple[str, dict[str, Any]]:
+    body = unescape((html or "").replace("\\/", "/"))
+    pattern = re.compile(
+        r"""(?:https?://[^"'<> ]+)?/s/sfsites/l/(?P<context>[^/"'<>?\s]+)/bootstrap\.js(?:\?[^"'<> ]*)?""",
+        re.I,
+    )
+    for match in pattern.finditer(body):
+        decoded = match.group("context")
+        for _ in range(3):
+            next_decoded = unquote(decoded)
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
+        try:
+            context = json.loads(decoded)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(context, dict) and context:
+            return LOAD_CURVES_PATH, context
+    raise ReteleElectriceHttpSemanticError("Aura shell bootstrap response has no usable bootstrap context.")
+
+
+def _get_application_aura_message() -> dict[str, Any]:
+    return {
+        "actions": [
+            {
+                "id": "1;a",
+                "descriptor": "aura://ComponentController/ACTION$getApplication",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "name": "siteforce:communityApp",
+                    "attributes": {},
+                    "chainLoadLabels": True,
+                },
+            }
+        ]
+    }
 
 
 def _pod_discovery_aura_message() -> dict[str, Any]:
@@ -848,6 +1023,49 @@ def _clean_field_label(value: str) -> str:
     return _collapse(str(value or "").rstrip(":"))
 
 
+def _load_curve_payload(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("<"):
+        match = re.search(r'<span[^>]+id=["\']j_id0:j_id2:asyncResponse["\'][^>]*>(?P<payload>.*?)</span>', text, re.S)
+        if not match:
+            _reject_error_payload(text, "load curve")
+            raise ReteleElectriceHttpSemanticError("Load-curve Visualforce response has no async payload.")
+        raw_payload = unescape(match.group("payload")).strip()
+        parsed = json.loads(raw_payload)
+        if isinstance(parsed, list):
+            return _curve_graph_from_daily_rows(parsed)
+        return parsed
+    _reject_error_payload(text, "load curve")
+    return _loads_portal_json(text, "load curve")
+
+
+def _curve_graph_from_daily_rows(rows: list[Any]) -> dict[str, Any]:
+    samples: list[dict[str, Any]] = []
+    measure = ""
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        measure = measure or _pick(row, "energyType")
+        sample_date = _pick(row, "sampleDate")
+        values = _pick(row, "sampleValues")
+        if not sample_date or not values:
+            continue
+        day_start = _parse_portal_datetime(sample_date)
+        for index, raw_value in enumerate(values.split(";")):
+            value = decimal_ro(raw_value)
+            if value is None:
+                continue
+            samples.append(
+                {
+                    "startAt": (day_start + timedelta(hours=index)).isoformat(),
+                    "value": value,
+                    "unit": "kWh",
+                    "intervalSeconds": 3600,
+                }
+            )
+    return {"CurveDiCaricoGraph": {"measure": measure, "sampleValues": samples}}
+
+
 def _find_curve_graph(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         if isinstance(value.get("sampleValues"), list):
@@ -902,7 +1120,28 @@ def _parse_portal_date(value: str) -> date:
     try:
         return date.fromisoformat(text)
     except ValueError:
-        return parse_ro_date(text)
+        pass
+    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return parse_ro_date(text)
+
+
+def _parse_portal_datetime(value: str) -> datetime:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=BUCHAREST)
+    except ValueError:
+        pass
+    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=BUCHAREST)
+        except ValueError:
+            pass
+    return datetime.combine(parse_ro_date(text), time.min, BUCHAREST)
 
 
 def _sample_interval_seconds(row: dict[str, Any]) -> int:
@@ -925,6 +1164,15 @@ def _active_import_interval(value: float, unit: str) -> tuple[float, str]:
     if normalized in {"kwh", ""}:
         return value * 1000.0, "Wh"
     raise ReteleElectriceHttpSemanticError(f"Unsupported active_import curve unit: {unit!r}.")
+
+
+def _month_bounds(day: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(day.replace(day=1), time.min, BUCHAREST)
+    if start.month == 12:
+        next_month = start.replace(year=start.year + 1, month=1)
+    else:
+        next_month = start.replace(month=start.month + 1)
+    return start, next_month - timedelta(seconds=1)
 
 
 def _find_reading_table(tables: list[list[list[str]]]) -> list[list[str]] | None:

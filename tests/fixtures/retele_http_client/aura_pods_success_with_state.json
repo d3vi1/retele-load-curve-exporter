@@ -1,0 +1,48 @@
+for(;;);
+{
+  "token": "SANITIZED_AURA_TOKEN_AFTER_PODS",
+  "context": {
+    "mode": "PROD",
+    "fwuid": "SANITIZED_POD_RETURNED_FWUID_DO_NOT_USE",
+    "app": "siteforce:communityApp",
+    "loaded": {
+      "APPLICATION@markup://siteforce:communityApp": "SANITIZED_POD_RETURNED_APP_HASH"
+    },
+    "dn": [],
+    "globals": {},
+    "uad": false
+  },
+  "actions": [
+    {
+      "id": "1;a",
+      "state": "SUCCESS",
+      "returnValue": {
+        "pods": [
+          {
+            "pod": "RO001EXXXXXXXXX",
+            "city": "REDACTED_CITY",
+            "county": "REDACTED_COUNTY",
+            "approvedPowerKw": "42",
+            "distributionCompany": "Retele Electrice",
+            "address": "REDACTED_ADDRESS"
+          },
+          {
+            "pod": "RO001EYYYYYYYYY",
+            "city": "REDACTED_CITY",
+            "county": "REDACTED_COUNTY",
+            "approvedPowerKw": "18",
+            "distributionCompany": "Retele Electrice",
+            "address": "REDACTED_ADDRESS"
+          }
+        ]
+      }
+    },
+    {
+      "id": "2;a",
+      "state": "SUCCESS",
+      "returnValue": {
+        "count": 2
+      }
+    }
+  ]
+}
