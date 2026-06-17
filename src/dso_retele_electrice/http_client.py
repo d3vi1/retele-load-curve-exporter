@@ -170,7 +170,8 @@ class ReteleElectriceHttpClient:
     async def get_pod_metadata(self, pod: str) -> PodMetadata:
         await self._ensure_login()
         response = await self._client.get(POD_INFO_PATH, params={"pod": pod})
-        self._validate_response(response, "POD metadata")
+        self._validate_status(response, "POD metadata")
+        _reject_login_payload(response.text, "POD metadata")
         return self.parse_pod_metadata_response(response.text, pod=pod, account=self.account)
 
     async def get_meter_readings(self, pod: str, expected_date: date | None = None) -> list[MeterReading]:
@@ -244,7 +245,7 @@ class ReteleElectriceHttpClient:
 
     @staticmethod
     def parse_pod_metadata_response(html: str, *, pod: str, account: str = "default") -> PodMetadata:
-        _reject_error_payload(html, "POD metadata")
+        _reject_login_payload(html, "POD metadata")
         normalized = _normalize_text(html)
         if _normalize_text(pod) not in normalized:
             raise ReteleElectriceHttpSemanticError("POD metadata response does not contain the requested POD.")

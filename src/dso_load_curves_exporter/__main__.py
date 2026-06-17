@@ -141,12 +141,14 @@ async def _fetch_configured_pods_http_snapshot(
     curves: list[LoadCurveSample] = []
     data_attempts = 0
     data_successes = 0
+    metadata_successes = 0
     data_errors: list[str] = []
     curve_day = datetime.now(BUCHAREST).date()
 
     for pod in pods:
         try:
             metadata.append(await client.get_pod_metadata(pod.pod))  # type: ignore[attr-defined]
+            metadata_successes += 1
         except Exception as exc:
             metadata.append(pod)
             print(f"poll warning account={account} pod={pod.pod} metadata failed: {exc}", flush=True)
@@ -169,11 +171,11 @@ async def _fetch_configured_pods_http_snapshot(
 
         await asyncio.sleep(0.2)
 
-    if data_attempts and data_successes == 0:
+    if data_attempts and data_successes == 0 and metadata_successes == 0:
         details = "; ".join(data_errors[:4])
         if len(data_errors) > 4:
             details += f"; ... {len(data_errors) - 4} more"
-        raise RuntimeError(f"All configured POD data fetches failed for account {account}: {details}")
+        raise RuntimeError(f"All configured POD fetches failed for account {account}: {details}")
 
     return metadata, readings, curves
 
