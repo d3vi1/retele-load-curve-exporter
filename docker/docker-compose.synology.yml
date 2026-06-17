@@ -1,7 +1,7 @@
 services:
   dso-load-curve-exporter:
     build:
-      context: .
+      context: ..
     image: dso-load-curve-exporter:local
     container_name: dso-load-curve-exporter
     restart: unless-stopped
