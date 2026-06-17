@@ -30,6 +30,17 @@ def fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def aura_reading_pod_details_response(pod: str = "RO001EXXXXXXXXX", customer_key: str = "cui") -> str:
+    return (
+        '{"actions":[{"id":"1;a","state":"SUCCESS","returnValue":'
+        '{"'
+        + customer_key
+        + '":"SANITIZED_CUI","owner":true,"pod":{"Name":"'
+        + pod
+        + '"},"result":"OK","type":"CLIENT"},"error":[]}]}'
+    )
+
+
 def test_shell_bootstrap_url_context_parse():
     page_uri, context = http_client._parse_aura_shell_bootstrap(
         fixture("aura_shell_bootstrap.html"),
@@ -385,7 +396,13 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested_paths.append(f"{request.method} {request.url.path}")
-        if request.url.path == AURA_PATH:
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            if request.url.params.get("other.PED_ReadingArchive.PODDetails") == "1":
+                return httpx.Response(200, text=aura_reading_pod_details_response())
             raise AssertionError("configured POD runtime must not call Aura discovery")
         if request.method == "GET" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_page.html"))
@@ -401,12 +418,12 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
             return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
         if request.method == "POST" and request.url.path == READINGS_PATH:
             form = dict(httpx.QueryParams(request.content.decode()))
-            if form["pod"] == "RO001EXXXXXXXXX":
-                return httpx.Response(200, text=fixture("readings_visualforce.html"))
+            if form["params"] == ",SANITIZED_CUI,,RO001EXXXXXXXXX,01/01/2024 00:00:00,30/06/2026 00:00:00":
+                return httpx.Response(200, text=fixture("readings_async_visualforce.html"))
             return httpx.Response(500, text="sanitized readings failure")
         if request.method == "POST" and request.url.path == CURVE_PATH:
             form = dict(httpx.QueryParams(request.content.decode()))
-            if form["pod"] == "RO001EXXXXXXXXX":
+            if ",RO001EXXXXXXXXX,WI," in form["params"]:
                 return httpx.Response(200, text=fixture("curve_samples_wi.json"))
             return httpx.Response(500, text="sanitized curve failure")
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
@@ -436,12 +453,19 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
     readings = exc_info.value.readings
     curves = exc_info.value.curves
 
-    assert f"POST {AURA_PATH}" not in requested_paths
+    assert not any(
+        "other.PED_Search_My_POD_.searchDBVisualizzaFornitura" in path for path in requested_paths
+    )
     assert [item.pod for item in metadata] == ["RO001EXXXXXXXXX", "RO001EYYYYYYYYY"]
     assert metadata[0].supplier == "SANITIZED_SUPPLIER"
     assert metadata[1].account == "main"
     assert metadata[1].supplier == ""
-    assert [item.pod for item in readings] == ["RO001EXXXXXXXXX", "RO001EXXXXXXXXX"]
+    assert [item.pod for item in readings] == [
+        "RO001EXXXXXXXXX",
+        "RO001EXXXXXXXXX",
+        "RO001EXXXXXXXXX",
+        "RO001EXXXXXXXXX",
+    ]
     assert curves == []
     assert exc_info.value.replace_readings is True
     assert exc_info.value.replace_curves is False
@@ -449,7 +473,13 @@ def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_fail
 
 def test_http_configured_pods_raise_when_every_data_fetch_fails(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == AURA_PATH:
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            if request.url.params.get("other.PED_ReadingArchive.PODDetails") == "1":
+                return httpx.Response(200, text=aura_reading_pod_details_response())
             raise AssertionError("configured POD runtime must not call Aura discovery")
         if request.method == "GET" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_page.html"))
@@ -490,7 +520,13 @@ def test_http_configured_pods_raise_when_every_data_fetch_fails(monkeypatch):
 
 def test_http_configured_pods_publish_metadata_when_all_data_fetches_fail(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == AURA_PATH:
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            if request.url.params.get("other.PED_ReadingArchive.PODDetails") == "1":
+                return httpx.Response(200, text=aura_reading_pod_details_response())
             raise AssertionError("configured POD runtime must not call Aura discovery")
         if request.method == "GET" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_page.html"))
@@ -556,6 +592,24 @@ def test_parse_visualforce_readings_table_to_meter_readings():
     assert readings[1].value == 0.5
 
 
+def test_parse_visualforce_async_xml_readings_payload():
+    readings = ReteleElectriceHttpClient.parse_visualforce_readings_table(
+        fixture("readings_async_visualforce.html"),
+        pod="RO001EXXXXXXXXX",
+        account="main",
+        expected_date=date(2026, 6, 1),
+    )
+
+    assert [(item.channel, item.obis_code, item.unit, item.value) for item in readings] == [
+        ("active_import", "1.8.0", "kWh", 8.901),
+        ("active_export", "2.8.0", "kWh", 290.284),
+        ("reactive_inductive", "5.8.0", "kvarh", 0.063),
+        ("reactive_capacitive", "8.8.0", "kvarh", 7.891),
+    ]
+    assert {item.constant for item in readings} == {"2000"}
+    assert {item.meter_serial for item in readings} == {"SERIAL"}
+
+
 def test_parse_visualforce_readings_rejects_wrong_pod_date_and_shape():
     with pytest.raises(ReteleElectriceHttpSemanticError, match="requested POD"):
         ReteleElectriceHttpClient.parse_visualforce_readings_table(
@@ -573,6 +627,22 @@ def test_parse_visualforce_readings_rejects_wrong_pod_date_and_shape():
     with pytest.raises(ReteleElectriceHttpSemanticError, match="readings table"):
         ReteleElectriceHttpClient.parse_visualforce_readings_table(
             "<html><body>POD: RO001EXXXXXXXXX<table><tr><td>not readings</td></tr></table></body></html>",
+            pod="RO001EXXXXXXXXX",
+        )
+
+    with pytest.raises(ReteleElectriceHttpSemanticError, match="Unsupported meter reading column"):
+        ReteleElectriceHttpClient.parse_visualforce_readings_table(
+            """
+            <html><body>POD: RO001EXXXXXXXXX
+              <table>
+                <tr>
+                  <th>DATA CITIRII</th><th>SERIE DE CONTOR</th><th>CONSTANTA</th><th>TIP CITIRE</th>
+                  <th>COLOANA NECUNOSCUTA</th>
+                </tr>
+                <tr><td>01.06.2026</td><td>SERIAL</td><td>1</td><td>REAL</td><td>1,23</td></tr>
+              </table>
+            </body></html>
+            """,
             pod="RO001EXXXXXXXXX",
         )
 
@@ -639,13 +709,24 @@ def test_http_methods_parse_fixture_backed_readings_and_curves_without_browser()
             return httpx.Response(200, text=fixture("login_page.html"))
         if request.method == "POST" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            return httpx.Response(200, text=aura_reading_pod_details_response())
         if request.method == "GET" and request.url.path == ROUTE_PATH:
             return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
         if request.method == "GET" and request.url.path in {READINGS_PATH, CURVE_PATH}:
             return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
         if request.method == "POST" and request.url.path == READINGS_PATH:
-            submitted_visualforce_forms.append(dict(httpx.QueryParams(request.content.decode())))
-            return httpx.Response(200, text=fixture("readings_visualforce.html"))
+            form = dict(httpx.QueryParams(request.content.decode()))
+            submitted_visualforce_forms.append(form)
+            assert form["methodN"] == "RetriveSingleSelf"
+            assert form["params"] == ",SANITIZED_CUI,,RO001EXXXXXXXXX,01/06/2026 00:00:00,30/06/2026 00:00:00"
+            assert form["j_id0:j_id2:j_id3"] == "j_id0:j_id2:j_id3"
+            assert form["uniqueId"]
+            return httpx.Response(200, text=fixture("readings_async_visualforce.html"))
         if request.method == "POST" and request.url.path == CURVE_PATH:
             form = dict(httpx.QueryParams(request.content.decode()))
             submitted_visualforce_forms.append(form)
@@ -667,13 +748,49 @@ def test_http_methods_parse_fixture_backed_readings_and_curves_without_browser()
 
     readings, samples, session_state = asyncio.run(run())
 
-    assert readings[0].channel == "active_import_zone_1"
+    assert readings[0].channel == "active_import"
     assert samples[0].channel == "active_import"
     assert submitted_visualforce_forms[0]["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
-    assert submitted_visualforce_forms[0]["pod"] == "RO001EXXXXXXXXX"
     assert submitted_visualforce_forms[1]["com.salesforce.visualforce.ViewState"] == "SANITIZED_VIEWSTATE"
     assert submitted_visualforce_forms[1]["uniqueId"] == "RO001EXXXXXXXXX-20260601-WI"
     assert session_state == SessionState.VISUALFORCE_READY
+
+
+def test_meter_readings_accept_person_account_customer_code_key():
+    submitted_forms: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            return httpx.Response(200, text=aura_reading_pod_details_response(customer_key="cnp"))
+        if request.method == "GET" and request.url.path == READINGS_PATH:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path == READINGS_PATH:
+            form = dict(httpx.QueryParams(request.content.decode()))
+            submitted_forms.append(form)
+            return httpx.Response(200, text=fixture("readings_async_visualforce.html"))
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            account="person",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            return await client.get_meter_readings("RO001EXXXXXXXXX", expected_date=date(2026, 6, 1))
+
+    readings = asyncio.run(run())
+
+    assert readings[0].account == "person"
+    assert submitted_forms[0]["params"].startswith(",SANITIZED_CUI,,RO001EXXXXXXXXX,")
 
 
 def test_visualforce_form_bootstrap_rejects_missing_viewstate():
@@ -682,6 +799,13 @@ def test_visualforce_form_bootstrap_rejects_missing_viewstate():
             return httpx.Response(200, text=fixture("login_page.html"))
         if request.method == "POST" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            if request.url.params.get("other.PED_ReadingArchive.PODDetails") == "1":
+                return httpx.Response(200, text=aura_reading_pod_details_response())
         if request.method == "GET" and request.url.path == ROUTE_PATH:
             return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
         if request.method == "GET" and request.url.path == READINGS_PATH:
@@ -706,6 +830,13 @@ def test_visualforce_post_rejects_login_page_masquerading_as_200():
             return httpx.Response(200, text=fixture("login_page.html"))
         if request.method == "POST" and request.url.path == LOGIN_PATH:
             return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == LOAD_CURVES_PATH:
+            return httpx.Response(200, text=fixture("aura_shell_bootstrap.html"))
+        if request.method == "POST" and request.url.path == AURA_PATH:
+            if request.url.params.get("aura.Component.getApplication") == "1":
+                return httpx.Response(200, text=fixture("aura_get_application_success.json"))
+            if request.url.params.get("other.PED_ReadingArchive.PODDetails") == "1":
+                return httpx.Response(200, text=aura_reading_pod_details_response())
         if request.method == "GET" and request.url.path == ROUTE_PATH:
             return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
         if request.method == "GET" and request.url.path == READINGS_PATH:

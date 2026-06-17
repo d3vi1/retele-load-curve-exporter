@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -38,6 +39,12 @@ ENERGY_CODE_BY_CHANNEL = {
     "active_import": "WI",
 }
 CHANNEL_BY_ENERGY_CODE = {code: channel for channel, code in ENERGY_CODE_BY_CHANNEL.items()}
+READING_CHANNEL_BY_PORTAL_CODE = {
+    "EA": ("active_import", OBIS_BY_CHANNEL["active_import"], "kWh"),
+    "EAP": ("active_export", OBIS_BY_CHANNEL["active_export"], "kWh"),
+    "ER": ("reactive_inductive", OBIS_BY_CHANNEL["reactive_inductive"], "kvarh"),
+    "ERC": ("reactive_capacitive", OBIS_BY_CHANNEL["reactive_capacitive"], "kvarh"),
+}
 
 POD_RE = re.compile(r"\bRO\d{3}E[A-Z0-9X]{6,}\b", re.I)
 ERROR_MARKERS = (
@@ -168,6 +175,7 @@ class ReteleElectriceHttpClient:
 
     async def list_pods(self) -> list[PodMetadata]:
         await self._ensure_aura_ready()
+        self._aura_page_uri = LOAD_CURVES_PATH
         response = await self._client.post(
             AURA_PATH,
             params={
@@ -194,10 +202,23 @@ class ReteleElectriceHttpClient:
         return self.parse_single_pod_record(record, pod=pod, account=self.account)
 
     async def get_meter_readings(self, pod: str, expected_date: date | None = None) -> list[MeterReading]:
+        details = await self._get_reading_archive_details(pod)
+        cui = _pick(details, "cui", "CUI", "cnp", "CNP")
+        if not cui:
+            raise ReteleElectriceHttpSemanticError("Meter readings PODDetails response has no customer code.")
         form_data = await self._visualforce_form_payload(READINGS_PATH, "meter readings")
-        form_data["pod"] = pod
+        start, end = _reading_archive_bounds(expected_date)
+        form_data.update(
+            {
+                "AJAXREQUEST": "_viewRoot",
+                "j_id0:j_id2:j_id3": "j_id0:j_id2:j_id3",
+                "methodN": "RetriveSingleSelf",
+                "params": f",{cui},,{pod},{start:%d/%m/%Y %H:%M:%S},{end:%d/%m/%Y %H:%M:%S}",
+                "uniqueId": str(uuid.uuid4()),
+            }
+        )
         response = await self._client.post(READINGS_PATH, data=form_data)
-        self._validate_visualforce_response(response, "meter readings", success_marker=pod)
+        self._validate_status(response, "meter readings")
         return self.parse_visualforce_readings_table(
             response.text,
             pod=pod,
@@ -350,6 +371,10 @@ class ReteleElectriceHttpClient:
         account: str = "default",
         expected_date: date | None = None,
     ) -> list[MeterReading]:
+        async_payload = _visualforce_async_payload(html, "meter readings")
+        if isinstance(async_payload, dict) and "XML_Readings" in async_payload:
+            return _parse_xml_readings_payload(async_payload, pod=pod, account=account, expected_date=expected_date)
+
         _reject_error_payload(html, "meter readings")
         normalized = _normalize_text(html)
         if _normalize_text(pod) not in normalized:
@@ -455,6 +480,7 @@ class ReteleElectriceHttpClient:
 
     async def _get_single_pod_record(self, pod: str) -> dict[str, Any]:
         await self._ensure_aura_ready()
+        self._aura_page_uri = LOAD_CURVES_PATH
         message = {
             "actions": [
                 {
@@ -478,6 +504,33 @@ class ReteleElectriceHttpClient:
             if isinstance(value, dict):
                 return value
         raise ReteleElectriceHttpSemanticError("POD metadata response has no POD record.")
+
+    async def _get_reading_archive_details(self, pod: str) -> dict[str, Any]:
+        await self._ensure_aura_ready()
+        self._aura_page_uri = f"/s/new-reading-archive-client?pod={pod}"
+        message = {
+            "actions": [
+                {
+                    "id": "1;a",
+                    "descriptor": "apex://PED_ReadingArchiveController/ACTION$PODDetails",
+                    "callingDescriptor": "markup://c:PED_Reading_Archive_Tab",
+                    "params": {"PodId": pod},
+                }
+            ]
+        }
+        response = await self._client.post(
+            AURA_PATH,
+            params={"r": "7", "other.PED_ReadingArchive.PODDetails": "1"},
+            data=self._aura_form(message),
+        )
+        self._validate_aura_response(response, "meter readings PODDetails")
+        self._update_aura_state_from_response(response.text, "meter readings PODDetails")
+        payload = _loads_portal_json(response.text, "meter readings PODDetails")
+        for action in payload.get("actions", []) if isinstance(payload, dict) else []:
+            value = action.get("returnValue")
+            if isinstance(value, dict):
+                return value
+        raise ReteleElectriceHttpSemanticError("Meter readings PODDetails response has no return value.")
 
     async def _ensure_login(self) -> None:
         if self._session.state == SessionState.UNAUTHENTICATED:
@@ -641,7 +694,7 @@ class ReteleElectriceHttpClient:
 
 def _reject_error_payload(text: str, label: str) -> None:
     normalized = _normalize_text(text)
-    if "utilizator" in normalized and "parola" in normalized:
+    if _looks_like_login_form(normalized):
         raise ReteleElectriceHttpSemanticError(f"{label} response is a login page.")
     if any(marker in normalized for marker in ERROR_MARKERS):
         raise ReteleElectriceHttpSemanticError(f"{label} response contains an error marker.")
@@ -649,8 +702,16 @@ def _reject_error_payload(text: str, label: str) -> None:
 
 def _reject_login_payload(text: str, label: str) -> None:
     normalized = _normalize_text(text)
-    if "utilizator" in normalized and "parola" in normalized:
+    if _looks_like_login_form(normalized):
         raise ReteleElectriceHttpSemanticError(f"{label} response is a login page.")
+
+
+def _looks_like_login_form(normalized_text: str) -> bool:
+    if "utilizator" in normalized_text and "parola" in normalized_text:
+        return True
+    if "autentific" in normalized_text and ("username" in normalized_text or "password" in normalized_text):
+        return True
+    return False
 
 
 def _loads_portal_json(text: str, label: str) -> Any:
@@ -1026,17 +1087,84 @@ def _clean_field_label(value: str) -> str:
 def _load_curve_payload(text: str) -> Any:
     stripped = text.strip()
     if stripped.startswith("<"):
-        match = re.search(r'<span[^>]+id=["\']j_id0:j_id2:asyncResponse["\'][^>]*>(?P<payload>.*?)</span>', text, re.S)
-        if not match:
+        payload = _visualforce_async_payload(text, "load curve")
+        if payload is None:
             _reject_error_payload(text, "load curve")
             raise ReteleElectriceHttpSemanticError("Load-curve Visualforce response has no async payload.")
-        raw_payload = unescape(match.group("payload")).strip()
-        parsed = json.loads(raw_payload)
-        if isinstance(parsed, list):
-            return _curve_graph_from_daily_rows(parsed)
-        return parsed
+        if isinstance(payload, list):
+            return _curve_graph_from_daily_rows(payload)
+        return payload
     _reject_error_payload(text, "load curve")
     return _loads_portal_json(text, "load curve")
+
+
+def _visualforce_async_payload(text: str, label: str) -> Any | None:
+    match = re.search(r'<span[^>]+id=["\']j_id0:j_id2:asyncResponse["\'][^>]*>(?P<payload>.*?)</span>', text, re.S)
+    if not match:
+        return None
+    raw_payload = unescape(match.group("payload")).strip()
+    if not raw_payload or raw_payload == "null":
+        return None
+    try:
+        return json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise ReteleElectriceHttpSemanticError(f"{label} Visualforce async payload is not valid JSON.") from exc
+
+
+def _parse_xml_readings_payload(
+    payload: dict[str, Any],
+    *,
+    pod: str,
+    account: str,
+    expected_date: date | None,
+) -> list[MeterReading]:
+    rows = payload.get("XML_Readings")
+    if not isinstance(rows, list) or not rows:
+        raise ReteleElectriceHttpSemanticError("Meter readings async payload has no XML_Readings rows.")
+    readings: list[MeterReading] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        read_date = _parse_portal_date(_pick(row, "measureDate"))
+        if expected_date is not None and read_date != expected_date:
+            continue
+        read_at = datetime.combine(read_date, time.min, BUCHAREST)
+        meter_serial = _pick(row, "SerialNumber")
+        constant = _pick(row, "constanta", "constant")
+        reading_type = _pick(row, "typeOfReading", "readingType")
+        meters = row.get("meter")
+        if not isinstance(meters, list):
+            continue
+        for item in meters:
+            if not isinstance(item, dict):
+                continue
+            portal_code = _pick(item, "typeofenergy_measured", "typeOfEnergyMeasured").upper()
+            try:
+                channel, obis_code, unit = READING_CHANNEL_BY_PORTAL_CODE[portal_code]
+            except KeyError as exc:
+                raise ReteleElectriceHttpSemanticError(
+                    f"Unsupported meter reading energy code: {portal_code or '<missing>'!r}."
+                ) from exc
+            value = _portal_json_number(_pick(item, "Value", "value"))
+            readings.append(
+                MeterReading(
+                    pod=pod,
+                    account=account,
+                    read_at=read_at,
+                    meter_serial=meter_serial,
+                    constant=constant,
+                    reading_type=reading_type,
+                    channel=channel,
+                    obis_code=obis_code,
+                    value=value,
+                    unit=unit,
+                )
+            )
+    if not readings:
+        if expected_date is not None:
+            raise ReteleElectriceHttpSemanticError("Meter readings response has no rows for the requested date.")
+        raise ReteleElectriceHttpSemanticError("Meter readings response has no parseable values.")
+    return readings
 
 
 def _curve_graph_from_daily_rows(rows: list[Any]) -> dict[str, Any]:
@@ -1175,6 +1303,26 @@ def _month_bounds(day: date) -> tuple[datetime, datetime]:
     return start, next_month - timedelta(seconds=1)
 
 
+def _reading_archive_bounds(expected_date: date | None) -> tuple[datetime, datetime]:
+    today = datetime.now(BUCHAREST).date()
+    if expected_date is not None:
+        start_day = expected_date.replace(day=1)
+        if start_day.month == 12:
+            next_month = start_day.replace(year=start_day.year + 1, month=1)
+        else:
+            next_month = start_day.replace(month=start_day.month + 1)
+        end_day = next_month - timedelta(days=1)
+    else:
+        start_day = date(today.year - 2, 1, 1)
+        month_start = today.replace(day=1)
+        if month_start.month == 12:
+            next_month = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            next_month = month_start.replace(month=month_start.month + 1)
+        end_day = next_month - timedelta(days=1)
+    return datetime.combine(start_day, time.min, BUCHAREST), datetime.combine(end_day, time.min, BUCHAREST)
+
+
 def _find_reading_table(tables: list[list[list[str]]]) -> list[list[str]] | None:
     for table in tables:
         if not table:
@@ -1199,7 +1347,22 @@ def _reading_channel(title: str) -> tuple[str, str, str]:
         return "reactive_capacitive", OBIS_BY_CHANNEL["reactive_capacitive"], "kvarh"
     if "reactiva inductiva" in normalized:
         return "reactive_inductive", OBIS_BY_CHANNEL["reactive_inductive"], "kvarh"
-    return "unknown", "", ""
+    raise ReteleElectriceHttpSemanticError(f"Unsupported meter reading column: {title!r}.")
+
+
+def _portal_json_number(value: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        raise ReteleElectriceHttpSemanticError("Meter reading value is empty.")
+    if "," not in text and "." in text:
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ReteleElectriceHttpSemanticError(f"Meter reading value is not numeric: {value!r}.") from exc
+    parsed = decimal_ro(text)
+    if parsed is None:
+        raise ReteleElectriceHttpSemanticError(f"Meter reading value is not numeric: {value!r}.")
+    return parsed
 
 
 def _normalize_key(value: str) -> str:

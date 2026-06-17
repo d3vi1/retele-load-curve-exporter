@@ -13,7 +13,21 @@ services:
       EXPORTER_POLL_SECONDS: "${EXPORTER_POLL_SECONDS:-900}"
       EXPORTER_HEADLESS: "true"
     ports:
-      - "9831:9831/tcp"
+      - "127.0.0.1:9831:9831/tcp"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - prometheus-tancabesti
 

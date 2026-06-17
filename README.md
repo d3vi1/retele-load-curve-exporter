@@ -53,14 +53,7 @@ docker run --rm -p 9831:9831 \
   dso-load-curve-exporter:local
 ```
 
-## Synology Observability
-
-Current DiskStation deployment:
-
-- Exporter metrics: `http://diskstation.vilt.ro:9831/metrics`
-- Prometheus: `http://diskstation.vilt.ro:9092/`
-- Grafana: `http://192.168.37.21/grafana/`
-- Grafana dashboard: `http://192.168.37.21/grafana/d/tancabesti-dso-meter-readings/tancabesti-dso-meter-readings`
+## Observability
 
 Prometheus verification queries:
 
@@ -78,3 +71,11 @@ count(dso_meter_reading_reactive_energy_kvarh)
 Prometheus scrapes current exporter state. Historical imports should be written
 as OpenMetrics blocks with `promtool tsdb create-blocks-from openmetrics`, not
 served as thousands of old timestamped samples from `/metrics`.
+
+## Public Safety
+
+- Do not commit portal usernames, passwords, cookies, Aura tokens, session IDs,
+  raw POD lists, or raw portal payloads.
+- Keep deployment hostnames, private IPs, and Grafana/Prometheus URLs in local
+  runbooks or ignored files.
+- Fixtures must be sanitized and should preserve only protocol shape.

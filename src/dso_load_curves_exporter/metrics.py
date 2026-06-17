@@ -27,7 +27,7 @@ class Snapshot:
             f"dso_exporter_last_success_timestamp_seconds {self.last_success or 0}",
             "# HELP dso_exporter_fetch_success Last fetch success as 1 or 0.",
             "# TYPE dso_exporter_fetch_success gauge",
-            f"dso_exporter_fetch_success {1 if self.last_success >= self.last_attempt and not self.last_error else 0}",
+            f"dso_exporter_fetch_success {1 if self.last_success >= self.last_attempt else 0}",
             "# HELP dso_exporter_last_error_info Last scrape error class, if any.",
             "# TYPE dso_exporter_last_error_info gauge",
             f'dso_exporter_last_error_info{{error_code="{esc(error_code(self.last_error))}"}} {1 if self.last_error else 0}',
@@ -97,10 +97,10 @@ class Snapshot:
                 {
                     "obis_code": curve.obis_code,
                     "channel": curve.channel,
-                    "interval": "PT15M",
+                    "interval": iso_duration_seconds(curve.interval_seconds),
                     "source_quantity": "interval_energy",
-                    "value_source": "portal_load_curve",
-                    "scaling_status": "scaled" if labels.get("constant") else "unscaled_missing_constant",
+                    "value_source": "portal_engineering_units",
+                    "scaling_status": "portal_units_unscaled",
                 }
             )
             lines.append(
@@ -109,17 +109,31 @@ class Snapshot:
             )
             if curve.interval_unit == "Wh":
                 lines.append(f"dso_load_curve_interval_energy_wh{{{label_text(labels)}}} {fmt(curve.interval_value)}")
-                p_labels = labels | {"source_quantity": "derived_power", "value_source": "derived_from_interval_energy"}
+                p_labels = labels | {"source_quantity": "derived_power", "value_source": "derived_from_portal_energy"}
                 lines.append(f"dso_load_curve_average_power_w{{{label_text(p_labels)}}} {fmt(curve.average_value)}")
             else:
                 lines.append(f"dso_load_curve_interval_reactive_energy_varh{{{label_text(labels)}}} {fmt(curve.interval_value)}")
-                p_labels = labels | {"source_quantity": "derived_reactive_power", "value_source": "derived_from_interval_reactive_energy"}
+                p_labels = labels | {"source_quantity": "derived_reactive_power", "value_source": "derived_from_portal_reactive_energy"}
                 lines.append(f"dso_load_curve_average_reactive_power_var{{{label_text(p_labels)}}} {fmt(curve.average_value)}")
         return "\n".join(lines) + "\n"
 
 
 def meta_labels(meta: PodMetadata) -> dict[str, str]:
-    return common_labels(meta, meta.account, meta.pod)
+    labels = common_labels(meta, meta.account, meta.pod)
+    labels.update(
+        {
+            "meter_brand": meta.meter_brand,
+            "meter_type": meta.meter_type,
+            "accuracy_class": meta.accuracy_class,
+            "interval": meta.interval,
+            "meter_status": meta.meter_status,
+            "delimitation_voltage": meta.delimitation_voltage,
+            "approved_power_kw": meta.approved_power_kw,
+            "mount_date": meta.mount_date,
+            "constant": meta.constant,
+        }
+    )
+    return labels
 
 
 def common_labels(meta: PodMetadata | None, account: str, pod: str) -> dict[str, str]:
@@ -138,15 +152,6 @@ def common_labels(meta: PodMetadata | None, account: str, pod: str) -> dict[str,
         "pod": meta.pod,
         "smartmeter_id": meta.smartmeter_id,
         "meter_serial": meta.meter_serial,
-        "meter_brand": meta.meter_brand,
-        "meter_type": meta.meter_type,
-        "accuracy_class": meta.accuracy_class,
-        "interval": meta.interval,
-        "meter_status": meta.meter_status,
-        "delimitation_voltage": meta.delimitation_voltage,
-        "approved_power_kw": meta.approved_power_kw,
-        "mount_date": meta.mount_date,
-        "constant": meta.constant,
     }
 
 
@@ -162,6 +167,16 @@ def fmt(value: float) -> str:
     if not math.isfinite(value):
         return "NaN"
     return f"{value:.12g}"
+
+
+def iso_duration_seconds(seconds: int) -> str:
+    if seconds <= 0:
+        return "PT0S"
+    if seconds % 3600 == 0:
+        return f"PT{seconds // 3600}H"
+    if seconds % 60 == 0:
+        return f"PT{seconds // 60}M"
+    return f"PT{seconds}S"
 
 
 def latest_readings(readings: Iterable[MeterReading]) -> list[MeterReading]:

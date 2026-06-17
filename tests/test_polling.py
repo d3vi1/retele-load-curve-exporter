@@ -125,6 +125,34 @@ def test_poll_once_preserves_last_good_dynamic_data_on_partial_snapshot(monkeypa
     asyncio.run(run())
 
 
+def test_partial_snapshot_replaces_only_successful_reading_series_and_preserves_metadata(monkeypatch):
+    snap = Snapshot()
+    monkeypatch.setattr(exporter, "SNAPSHOT", snap)
+    rich_meta = PodMetadata(pod="RO001", account="main", meter_serial="SERIAL-OLD", constant="1")
+    snap.metadata = {("main", "RO001"): rich_meta, ("main", "RO002"): _metadata("main", "RO002")}
+    old_ro001 = _reading("main", "RO001", channel="active_import", value=1)
+    old_ro002 = _reading("main", "RO002", channel="active_import", value=2)
+    old_export = _reading("main", "RO001", channel="active_export", value=3)
+    snap.readings = [old_ro001, old_ro002, old_export]
+
+    exporter._publish_account_snapshot(
+        "main",
+        [PodMetadata(pod="RO001", account="main")],
+        [_reading("main", "RO001", channel="active_import", value=10)],
+        [],
+        replace_readings=True,
+        replace_curves=False,
+        mark_success=False,
+    )
+
+    assert snap.metadata[("main", "RO001")] == rich_meta
+    assert _reading_values(snap.readings) == {
+        ("RO001", "active_import"): 10,
+        ("RO001", "active_export"): 3,
+        ("RO002", "active_import"): 2,
+    }
+
+
 def test_default_config_runtime_is_http_and_browser_client_is_not_imported(monkeypatch):
     monkeypatch.setenv("RETELE_ELECTRICE_USERNAME", "user")
     monkeypatch.setenv("RETELE_ELECTRICE_PASSWORD", "pass")
@@ -223,7 +251,7 @@ def _metadata(account: str, pod: str) -> PodMetadata:
     return PodMetadata(pod=pod, account=account, meter_serial=f"{account}-serial")
 
 
-def _reading(account: str, pod: str) -> MeterReading:
+def _reading(account: str, pod: str, *, channel: str = "active_import_zone_1", value: float = 1) -> MeterReading:
     return MeterReading(
         pod=pod,
         account=account,
@@ -231,8 +259,12 @@ def _reading(account: str, pod: str) -> MeterReading:
         meter_serial=f"{account}-serial",
         constant="1",
         reading_type="real",
-        channel="active_import_zone_1",
-        obis_code="1.8.1",
-        value=1,
+        channel=channel,
+        obis_code={"active_import": "1.8.0", "active_export": "2.8.0"}.get(channel, "1.8.1"),
+        value=value,
         unit="kWh",
     )
+
+
+def _reading_values(readings: list[MeterReading]) -> dict[tuple[str, str], float]:
+    return {(item.pod, item.channel): item.value for item in readings}

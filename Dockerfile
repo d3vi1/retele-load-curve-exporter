@@ -4,9 +4,13 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
+RUN addgroup --system exporter && adduser --system --ingroup exporter --home /nonexistent --no-create-home exporter
 
 ENV EXPORTER_HOST=0.0.0.0
 ENV EXPORTER_PORT=9831
 EXPOSE 9831
+USER exporter
+HEALTHCHECK --interval=60s --timeout=10s --start-period=45s --retries=3 \
+  CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"EXPORTER_PORT\", \"9831\")}/healthz', timeout=5).read()"
 
 CMD ["python", "-m", "dso_load_curves_exporter"]

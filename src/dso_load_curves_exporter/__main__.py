@@ -261,17 +261,41 @@ def _publish_account_snapshot(
     replace_curves: bool = True,
     mark_success: bool = True,
 ) -> None:
-    for key in [key for key in SNAPSHOT.metadata if key[0] == account]:
-        del SNAPSHOT.metadata[key]
-    SNAPSHOT.metadata.update({(item.account, item.pod): item for item in metadata})
+    if mark_success:
+        for key in [key for key in SNAPSHOT.metadata if key[0] == account]:
+            del SNAPSHOT.metadata[key]
+    for item in metadata:
+        key = (item.account, item.pod)
+        if mark_success or not _is_placeholder_metadata(item) or key not in SNAPSHOT.metadata:
+            SNAPSHOT.metadata[key] = item
     if replace_readings:
-        SNAPSHOT.readings = [item for item in SNAPSHOT.readings if item.account != account]
+        if mark_success:
+            SNAPSHOT.readings = [item for item in SNAPSHOT.readings if item.account != account]
+        else:
+            replacement_keys = {
+                (item.account, item.pod, item.channel, item.obis_code, item.reading_type) for item in readings
+            }
+            SNAPSHOT.readings = [
+                item
+                for item in SNAPSHOT.readings
+                if (item.account, item.pod, item.channel, item.obis_code, item.reading_type) not in replacement_keys
+            ]
         SNAPSHOT.readings.extend(readings)
     if replace_curves:
-        SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
+        if mark_success:
+            SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
+        else:
+            replacement_keys = {(item.account, item.pod, item.channel, item.obis_code) for item in curves}
+            SNAPSHOT.curves = [
+                item for item in SNAPSHOT.curves if (item.account, item.pod, item.channel, item.obis_code) not in replacement_keys
+            ]
         SNAPSHOT.curves.extend(curves)
     if mark_success:
         SNAPSHOT.last_success = time.time()
+
+
+def _is_placeholder_metadata(item: PodMetadata) -> bool:
+    return item == PodMetadata(pod=item.pod, account=item.account)
 
 
 def only_pods_for_account(config: Config, account: str) -> set[str] | None:
@@ -285,8 +309,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
             with LOCK:
-                ok = SNAPSHOT.last_success > 0 and not SNAPSHOT.last_error
-                body = b"ok\n" if ok else f"not ready: {SNAPSHOT.last_error}\n".encode()
+                ok = SNAPSHOT.last_success >= SNAPSHOT.last_attempt and SNAPSHOT.last_success > 0
+                if ok and SNAPSHOT.last_error:
+                    body = f"degraded: {SNAPSHOT.last_error}\n".encode()
+                elif ok:
+                    body = b"ok\n"
+                else:
+                    body = f"not ready: {SNAPSHOT.last_error}\n".encode()
             self.send_response(200 if ok else 503)
             self.end_headers()
             self.wfile.write(body)
