@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict
+from collections.abc import Iterable
 
 from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
 
@@ -27,7 +27,10 @@ class Snapshot:
             f"dso_exporter_last_success_timestamp_seconds {self.last_success or 0}",
             "# HELP dso_exporter_fetch_success Last fetch success as 1 or 0.",
             "# TYPE dso_exporter_fetch_success gauge",
-            f'dso_exporter_fetch_success{{last_error="{esc(self.last_error)}"}} {1 if self.last_success >= self.last_attempt and not self.last_error else 0}',
+            f"dso_exporter_fetch_success {1 if self.last_success >= self.last_attempt and not self.last_error else 0}",
+            "# HELP dso_exporter_last_error_info Last scrape error class, if any.",
+            "# TYPE dso_exporter_last_error_info gauge",
+            f'dso_exporter_last_error_info{{error_code="{esc(error_code(self.last_error))}"}} {1 if self.last_error else 0}',
             "# HELP dso_exporter_fetch_errors_total Portal scrape errors.",
             "# TYPE dso_exporter_fetch_errors_total counter",
             f"dso_exporter_fetch_errors_total {self.errors_total}",
@@ -45,9 +48,11 @@ class Snapshot:
                 "# TYPE dso_meter_reading_export_active_energy_kwh gauge",
                 "# HELP dso_meter_reading_reactive_energy_kvarh Meter cumulative reactive reading.",
                 "# TYPE dso_meter_reading_reactive_energy_kvarh gauge",
+                "# HELP dso_meter_reading_source_timestamp_seconds Source timestamp of the latest meter reading.",
+                "# TYPE dso_meter_reading_source_timestamp_seconds gauge",
             ]
         )
-        for reading in self.readings:
+        for reading in latest_readings(self.readings):
             meta = self.metadata.get((reading.account, reading.pod))
             labels = common_labels(meta, reading.account, reading.pod)
             labels.update(
@@ -57,7 +62,6 @@ class Snapshot:
                     "obis_code": reading.obis_code,
                     "channel": reading.channel,
                     "reading_type": reading.reading_type,
-                    "source_timestamp": reading.read_at.isoformat(),
                     "constant": reading.constant or labels.get("constant", ""),
                 }
             )
@@ -67,6 +71,10 @@ class Snapshot:
             elif reading.unit.lower() == "kvarh":
                 metric = "dso_meter_reading_reactive_energy_kvarh"
             lines.append(f"{metric}{{{label_text(labels)}}} {fmt(reading.value)}")
+            lines.append(
+                f"dso_meter_reading_source_timestamp_seconds{{{label_text(labels)}}} "
+                f"{fmt(reading.read_at.timestamp())}"
+            )
 
         lines.extend(
             [
@@ -78,9 +86,11 @@ class Snapshot:
                 "# TYPE dso_load_curve_average_power_w gauge",
                 "# HELP dso_load_curve_average_reactive_power_var Derived average reactive power.",
                 "# TYPE dso_load_curve_average_reactive_power_var gauge",
+                "# HELP dso_load_curve_source_timestamp_seconds Source timestamp of the latest load-curve interval.",
+                "# TYPE dso_load_curve_source_timestamp_seconds gauge",
             ]
         )
-        for curve in self.curves:
+        for curve in latest_curves(self.curves):
             meta = self.metadata.get((curve.account, curve.pod))
             labels = common_labels(meta, curve.account, curve.pod)
             labels.update(
@@ -88,11 +98,14 @@ class Snapshot:
                     "obis_code": curve.obis_code,
                     "channel": curve.channel,
                     "interval": "PT15M",
-                    "source_timestamp": curve.start_at.isoformat(),
                     "source_quantity": "interval_energy",
                     "value_source": "portal_load_curve",
                     "scaling_status": "scaled" if labels.get("constant") else "unscaled_missing_constant",
                 }
+            )
+            lines.append(
+                f"dso_load_curve_source_timestamp_seconds{{{label_text(labels)}}} "
+                f"{fmt(curve.start_at.timestamp())}"
             )
             if curve.interval_unit == "Wh":
                 lines.append(f"dso_load_curve_interval_energy_wh{{{label_text(labels)}}} {fmt(curve.interval_value)}")
@@ -131,14 +144,9 @@ def common_labels(meta: PodMetadata | None, account: str, pod: str) -> dict[str,
         "interval": meta.interval,
         "meter_status": meta.meter_status,
         "delimitation_voltage": meta.delimitation_voltage,
-        "atr_cer_number": meta.atr_cer_number,
-        "atr_cer_date": meta.atr_cer_date,
-        "consumption_address": meta.address,
         "approved_power_kw": meta.approved_power_kw,
         "mount_date": meta.mount_date,
         "constant": meta.constant,
-        "supplier": meta.supplier,
-        "balancing_responsible_party": meta.balancing_responsible_party,
     }
 
 
@@ -154,3 +162,42 @@ def fmt(value: float) -> str:
     if not math.isfinite(value):
         return "NaN"
     return f"{value:.12g}"
+
+
+def latest_readings(readings: Iterable[MeterReading]) -> list[MeterReading]:
+    latest: dict[tuple[str, str, str, str, str], MeterReading] = {}
+    for reading in readings:
+        key = (reading.account, reading.pod, reading.channel, reading.obis_code, reading.reading_type)
+        previous = latest.get(key)
+        if previous is None or reading.read_at > previous.read_at:
+            latest[key] = reading
+    return sorted(latest.values(), key=lambda item: (item.account, item.pod, item.channel, item.obis_code))
+
+
+def latest_curves(curves: Iterable[LoadCurveSample]) -> list[LoadCurveSample]:
+    latest: dict[tuple[str, str, str, str], LoadCurveSample] = {}
+    for curve in curves:
+        key = (curve.account, curve.pod, curve.channel, curve.obis_code)
+        previous = latest.get(key)
+        if previous is None or curve.start_at > previous.start_at:
+            latest[key] = curve
+    return sorted(latest.values(), key=lambda item: (item.account, item.pod, item.channel, item.obis_code))
+
+
+def error_code(message: str) -> str:
+    normalized = str(message or "").casefold()
+    if not normalized:
+        return ""
+    if "pod discovery" in normalized or "aura" in normalized:
+        return "pod_discovery_failed"
+    if "metadata" in normalized:
+        return "metadata_failed"
+    if "readings" in normalized:
+        return "readings_failed"
+    if "curves" in normalized or "load curve" in normalized:
+        return "load_curve_failed"
+    if "login" in normalized or "frontdoor" in normalized:
+        return "login_failed"
+    if "timeout" in normalized:
+        return "timeout"
+    return "portal_fetch_failed"

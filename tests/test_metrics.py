@@ -52,4 +52,66 @@ def test_snapshot_renders_reading_and_curve_metrics():
     assert "obis_code=\"1.8.1\"" in rendered
     assert "dso_load_curve_interval_energy_wh" in rendered
     assert "dso_load_curve_average_power_w" in rendered
+    assert "dso_meter_reading_source_timestamp_seconds" in rendered
+    assert "dso_load_curve_source_timestamp_seconds" in rendered
     assert "1224" in rendered
+
+
+def test_snapshot_does_not_render_sensitive_or_unbounded_labels():
+    snap = Snapshot()
+    snap.last_attempt = 2
+    snap.last_error = "main: POD discovery Aura response is not usable: malformed json."
+    meta = PodMetadata(
+        pod="RO001EXXXXXXXXX",
+        account="main",
+        meter_serial="SERIAL",
+        smartmeter_id="SERIAL",
+        constant="1",
+        address="REDACTED_STREET",
+        atr_cer_number="123456",
+        atr_cer_date="01.02.2024",
+        supplier="SANITIZED_SUPPLIER",
+        balancing_responsible_party="SANITIZED_PRE",
+    )
+    snap.metadata = {("main", meta.pod): meta}
+    when = datetime(2026, 6, 1, tzinfo=ZoneInfo("Europe/Bucharest"))
+    snap.readings = [
+        MeterReading(
+            pod=meta.pod,
+            account="main",
+            read_at=when,
+            meter_serial="SERIAL",
+            constant="1",
+            reading_type="real",
+            channel="active_import_zone_1",
+            obis_code="1.8.1",
+            value=34724,
+            unit="kWh",
+        ),
+        MeterReading(
+            pod=meta.pod,
+            account="main",
+            read_at=when.replace(day=2),
+            meter_serial="SERIAL",
+            constant="1",
+            reading_type="real",
+            channel="active_import_zone_1",
+            obis_code="1.8.1",
+            value=34725,
+            unit="kWh",
+        ),
+    ]
+
+    rendered = snap.render()
+
+    assert 'last_error="' not in rendered
+    assert 'error_code="pod_discovery_failed"' in rendered
+    assert "source_timestamp=" not in rendered
+    assert "consumption_address=" not in rendered
+    assert "atr_cer_number=" not in rendered
+    assert "atr_cer_date=" not in rendered
+    assert "supplier=" not in rendered
+    assert "balancing_responsible_party=" not in rendered
+    assert rendered.count("dso_meter_reading_active_energy_kwh{") == 1
+    assert "34725" in rendered
+    assert "34724" not in rendered
