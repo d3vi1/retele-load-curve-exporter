@@ -6,7 +6,7 @@ services:
     container_name: dso-load-curve-exporter
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     environment:
       EXPORTER_HOST: 0.0.0.0
       EXPORTER_PORT: "9831"
