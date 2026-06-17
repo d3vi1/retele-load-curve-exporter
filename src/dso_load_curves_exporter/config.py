@@ -15,6 +15,7 @@ class Account:
 class Config:
     accounts: list[Account]
     only_pods: set[str]
+    runtime: str
     host: str
     port: int
     poll_seconds: int
@@ -22,6 +23,10 @@ class Config:
 
 
 def load_config() -> Config:
+    runtime = os.getenv("RETELE_ELECTRICE_RUNTIME", "http").strip().lower()
+    if runtime not in {"http", "browser"}:
+        raise RuntimeError("RETELE_ELECTRICE_RUNTIME must be either 'http' or 'browser'.")
+
     account_names = _csv(os.getenv("RETELE_ELECTRICE_ACCOUNTS", "main"))
     accounts: list[Account] = []
     for name in account_names:
@@ -37,6 +42,7 @@ def load_config() -> Config:
     return Config(
         accounts=accounts,
         only_pods=set(_csv(os.getenv("RETELE_ELECTRICE_ONLY_PODS", ""))),
+        runtime=runtime,
         host=os.getenv("EXPORTER_HOST", "0.0.0.0"),
         port=int(os.getenv("EXPORTER_PORT", "9831")),
         poll_seconds=int(os.getenv("EXPORTER_POLL_SECONDS", "900")),

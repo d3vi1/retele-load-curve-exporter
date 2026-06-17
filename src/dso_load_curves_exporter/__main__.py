@@ -5,9 +5,9 @@ import asyncio
 import os
 import threading
 import time
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from dso_retele_electrice.client import fetch_account_snapshot
 from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
 
 from .config import Config, load_config
@@ -26,6 +26,7 @@ def main() -> None:
     config = Config(
         accounts=config.accounts,
         only_pods=config.only_pods,
+        runtime=config.runtime,
         host=args.host,
         port=args.port,
         poll_seconds=config.poll_seconds,
@@ -54,6 +55,7 @@ async def poll_once(config: Config) -> None:
         print(f"poll starting account={account.name}", flush=True)
         try:
             account_meta, account_readings, account_curves = await fetch_account_snapshot(
+                config.runtime,
                 account.name,
                 account.username,
                 account.password,
@@ -78,6 +80,78 @@ async def poll_once(config: Config) -> None:
                 SNAPSHOT.last_error = last_error
                 SNAPSHOT.errors_total += 1
             print(f"poll failed account={account.name}: {exc}", flush=True)
+
+
+async def fetch_account_snapshot(
+    runtime: str,
+    account: str,
+    username: str,
+    password: str,
+    only_pods: set[str] | None = None,
+    headless: bool = True,
+) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
+    if runtime == "http":
+        return await _fetch_account_snapshot_http(account, username, password, only_pods=only_pods)
+    if runtime == "browser":
+        return await _fetch_account_snapshot_browser(
+            account,
+            username,
+            password,
+            only_pods=only_pods,
+            headless=headless,
+        )
+    raise RuntimeError(f"Unsupported Rețele Electrice runtime {runtime!r}.")
+
+
+async def _fetch_account_snapshot_http(
+    account: str,
+    username: str,
+    password: str,
+    *,
+    only_pods: set[str] | None = None,
+) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
+    from dso_retele_electrice.http_client import ReteleElectriceHttpClient
+
+    async with ReteleElectriceHttpClient(username, password, account=account) as client:
+        pods = await client.list_pods()
+        if only_pods:
+            pods = [pod for pod in pods if pod.pod in only_pods]
+
+        readings: list[MeterReading] = []
+        curves: list[LoadCurveSample] = []
+        curve_day = date.today()
+        for pod in pods:
+            readings.extend(await client.get_meter_readings(pod.pod))
+            curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))
+            await asyncio.sleep(0.2)
+        return pods, readings, curves
+
+
+async def _fetch_account_snapshot_browser(
+    account: str,
+    username: str,
+    password: str,
+    *,
+    only_pods: set[str] | None = None,
+    headless: bool = True,
+) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
+    try:
+        __import__("playwright.async_api")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Browser runtime requires the optional Playwright dependency. "
+            "Install with 'dso-load-curve-exporter[browser]' or set RETELE_ELECTRICE_RUNTIME=http."
+        ) from exc
+
+    from dso_retele_electrice.client import fetch_account_snapshot as fetch_browser_account_snapshot
+
+    return await fetch_browser_account_snapshot(
+        account,
+        username,
+        password,
+        only_pods=only_pods,
+        headless=headless,
+    )
 
 
 def _publish_account_snapshot(

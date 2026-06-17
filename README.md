@@ -18,13 +18,22 @@ credentials.
 python -m venv .venv
 . .venv/bin/activate
 pip install -e .
-python -m playwright install chromium
 
 export RETELE_ELECTRICE_ACCOUNTS=main
+export RETELE_ELECTRICE_RUNTIME=http
 export RETELE_ELECTRICE_MAIN_USERNAME='user@example.com'
 export RETELE_ELECTRICE_MAIN_PASSWORD='secret'
 export RETELE_ELECTRICE_ONLY_PODS='RO001EXXXXXXXXX,RO001EYYYYYYYYY'
 python -m dso_load_curves_exporter --host 0.0.0.0 --port 9831
+```
+
+The exporter defaults to the HTTP runtime. The browser runtime is an optional
+fallback for local diagnostics:
+
+```sh
+pip install -e '.[browser]'
+python -m playwright install chromium
+export RETELE_ELECTRICE_RUNTIME=browser
 ```
 
 Scrape:
