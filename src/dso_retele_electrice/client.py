@@ -141,7 +141,8 @@ class ReteleElectriceClient:
     async def get_meter_readings(self, pod: str) -> list[MeterReading]:
         await self._goto(f"{BASE_URL}{READINGS_PATH}?pod={pod}")
         await self._page.wait_for_function("() => document.body && document.body.innerText.includes('Detaliu')")
-        await self._page.wait_for_timeout(1500)
+        await self._page.wait_for_function("() => document.body && document.body.innerText.includes('SERIE DE CONTOR')")
+        await self._page.wait_for_timeout(3500)
         tables = await self._tables()
         reading_tables = [table for table in tables if table and table[0] and "DATA CITIRII" in table[0][0].upper()]
         if not reading_tables:
