@@ -109,6 +109,23 @@ def test_default_config_runtime_is_http_and_browser_client_is_not_imported(monke
     assert "dso_retele_electrice.client" not in sys.modules
 
 
+def test_config_supports_account_scoped_static_pods(monkeypatch):
+    monkeypatch.setenv("RETELE_ELECTRICE_ACCOUNTS", "main,calin")
+    monkeypatch.setenv("RETELE_ELECTRICE_MAIN_USERNAME", "main-user")
+    monkeypatch.setenv("RETELE_ELECTRICE_MAIN_PASSWORD", "main-pass")
+    monkeypatch.setenv("RETELE_ELECTRICE_CALIN_USERNAME", "calin-user")
+    monkeypatch.setenv("RETELE_ELECTRICE_CALIN_PASSWORD", "calin-pass")
+    monkeypatch.setenv("RETELE_ELECTRICE_ONLY_PODS", "RO001EGLOBAL")
+    monkeypatch.setenv("RETELE_ELECTRICE_MAIN_ONLY_PODS", "RO001EMAIN")
+
+    from dso_load_curves_exporter.config import load_config
+
+    config = load_config()
+
+    assert exporter.only_pods_for_account(config, "main") == {"RO001EMAIN"}
+    assert exporter.only_pods_for_account(config, "calin") == {"RO001EGLOBAL"}
+
+
 def test_default_exporter_import_does_not_load_browser_client_in_fresh_process():
     code = (
         "import sys; "
@@ -163,6 +180,7 @@ def _config(*accounts: str) -> Config:
     return Config(
         accounts=[Account(name=account, username="user", password="pass") for account in accounts],
         only_pods=set(),
+        only_pods_by_account={account: set() for account in accounts},
         runtime="http",
         host="127.0.0.1",
         port=0,

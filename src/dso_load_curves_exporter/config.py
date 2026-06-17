@@ -15,6 +15,7 @@ class Account:
 class Config:
     accounts: list[Account]
     only_pods: set[str]
+    only_pods_by_account: dict[str, set[str]]
     runtime: str
     host: str
     port: int
@@ -39,9 +40,14 @@ def load_config() -> Config:
         if not username or not password:
             raise RuntimeError(f"Missing credentials for Rețele Electrice account {name!r}.")
         accounts.append(Account(name=name, username=username, password=password))
+    global_only_pods = set(_csv(os.getenv("RETELE_ELECTRICE_ONLY_PODS", "")))
+    only_pods_by_account = {
+        name: set(_csv(os.getenv(f"RETELE_ELECTRICE_{name.upper()}_ONLY_PODS", ""))) for name in account_names
+    }
     return Config(
         accounts=accounts,
-        only_pods=set(_csv(os.getenv("RETELE_ELECTRICE_ONLY_PODS", ""))),
+        only_pods=global_only_pods,
+        only_pods_by_account=only_pods_by_account,
         runtime=runtime,
         host=os.getenv("EXPORTER_HOST", "0.0.0.0"),
         port=int(os.getenv("EXPORTER_PORT", "9831")),

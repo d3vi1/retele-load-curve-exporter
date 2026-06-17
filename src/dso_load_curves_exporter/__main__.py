@@ -5,10 +5,11 @@ import asyncio
 import os
 import threading
 import time
-from datetime import date
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
+from dso_retele_electrice.parsing import BUCHAREST
 
 from .config import Config, load_config
 from .metrics import Snapshot
@@ -26,6 +27,7 @@ def main() -> None:
     config = Config(
         accounts=config.accounts,
         only_pods=config.only_pods,
+        only_pods_by_account=config.only_pods_by_account,
         runtime=config.runtime,
         host=args.host,
         port=args.port,
@@ -59,7 +61,7 @@ async def poll_once(config: Config) -> None:
                 account.name,
                 account.username,
                 account.password,
-                only_pods=config.only_pods or None,
+                only_pods=only_pods_for_account(config, account.name),
                 headless=config.headless,
             )
             with LOCK:
@@ -120,7 +122,7 @@ async def _fetch_account_snapshot_http(
 
         readings: list[MeterReading] = []
         curves: list[LoadCurveSample] = []
-        curve_day = date.today()
+        curve_day = datetime.now(BUCHAREST).date()
         for pod in pods:
             readings.extend(await client.get_meter_readings(pod.pod))
             curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))
@@ -140,7 +142,7 @@ async def _fetch_configured_pods_http_snapshot(
     data_attempts = 0
     data_successes = 0
     data_errors: list[str] = []
-    curve_day = date.today()
+    curve_day = datetime.now(BUCHAREST).date()
 
     for pod in pods:
         try:
@@ -217,6 +219,13 @@ def _publish_account_snapshot(
     SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
     SNAPSHOT.curves.extend(curves)
     SNAPSHOT.last_success = time.time()
+
+
+def only_pods_for_account(config: Config, account: str) -> set[str] | None:
+    account_pods = config.only_pods_by_account.get(account, set())
+    if account_pods:
+        return account_pods
+    return config.only_pods or None
 
 
 class Handler(BaseHTTPRequestHandler):
