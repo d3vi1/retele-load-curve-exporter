@@ -8,6 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dso_retele_electrice.client import fetch_account_snapshot
+from dso_retele_electrice.models import LoadCurveSample, MeterReading, PodMetadata
 
 from .config import Config, load_config
 from .metrics import Snapshot
@@ -44,12 +45,13 @@ async def poll_loop(config: Config) -> None:
 
 
 async def poll_once(config: Config) -> None:
-    metadata = []
-    readings = []
-    curves = []
-    last_error = ""
     now = time.time()
+    cycle_errors: list[str] = []
+    with LOCK:
+        SNAPSHOT.last_attempt = now
+
     for account in config.accounts:
+        print(f"poll starting account={account.name}", flush=True)
         try:
             account_meta, account_readings, account_curves = await fetch_account_snapshot(
                 account.name,
@@ -58,22 +60,40 @@ async def poll_once(config: Config) -> None:
                 only_pods=config.only_pods or None,
                 headless=config.headless,
             )
-            metadata.extend(account_meta)
-            readings.extend(account_readings)
-            curves.extend(account_curves)
+            with LOCK:
+                _publish_account_snapshot(account.name, account_meta, account_readings, account_curves)
+                if not cycle_errors:
+                    SNAPSHOT.last_error = ""
+            pod_count = len({item.pod for item in account_meta})
+            print(
+                f"poll published account={account.name} pods={pod_count} "
+                f"readings={len(account_readings)} curves={len(account_curves)}",
+                flush=True,
+            )
         except Exception as exc:
             last_error = f"{account.name}: {exc}"
-    with LOCK:
-        SNAPSHOT.last_attempt = now
-        if last_error:
-            SNAPSHOT.last_error = last_error
-            SNAPSHOT.errors_total += 1
-        else:
-            SNAPSHOT.last_success = time.time()
-            SNAPSHOT.last_error = ""
-            SNAPSHOT.metadata = {(item.account, item.pod): item for item in metadata}
-            SNAPSHOT.readings = readings
-            SNAPSHOT.curves = curves
+            cycle_errors.append(last_error)
+            with LOCK:
+                SNAPSHOT.last_attempt = now
+                SNAPSHOT.last_error = last_error
+                SNAPSHOT.errors_total += 1
+            print(f"poll failed account={account.name}: {exc}", flush=True)
+
+
+def _publish_account_snapshot(
+    account: str,
+    metadata: list[PodMetadata],
+    readings: list[MeterReading],
+    curves: list[LoadCurveSample],
+) -> None:
+    for key in [key for key in SNAPSHOT.metadata if key[0] == account]:
+        del SNAPSHOT.metadata[key]
+    SNAPSHOT.metadata.update({(item.account, item.pod): item for item in metadata})
+    SNAPSHOT.readings = [item for item in SNAPSHOT.readings if item.account != account]
+    SNAPSHOT.readings.extend(readings)
+    SNAPSHOT.curves = [item for item in SNAPSHOT.curves if item.account != account]
+    SNAPSHOT.curves.extend(curves)
+    SNAPSHOT.last_success = time.time()
 
 
 class Handler(BaseHTTPRequestHandler):
