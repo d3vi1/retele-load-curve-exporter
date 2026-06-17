@@ -44,6 +44,26 @@ docker run --rm -p 9831:9831 \
   dso-load-curve-exporter:local
 ```
 
+## Synology Observability
+
+Current DiskStation deployment:
+
+- Exporter metrics: `http://diskstation.vilt.ro:9831/metrics`
+- Prometheus: `http://diskstation.vilt.ro:9092/`
+- Grafana: `http://192.168.37.21/grafana/`
+- Grafana dashboard: `http://192.168.37.21/grafana/d/tancabesti-dso-meter-readings/tancabesti-dso-meter-readings`
+
+Prometheus verification queries:
+
+```promql
+up{job="dso-load-curve-exporter"}
+dso_exporter_fetch_success
+count(dso_load_curve_meter_info)
+count(dso_meter_reading_active_energy_kwh)
+count(dso_meter_reading_export_active_energy_kwh)
+count(dso_meter_reading_reactive_energy_kvarh)
+```
+
 ## Notes
 
 Prometheus scrapes current exporter state. Historical imports should be written
