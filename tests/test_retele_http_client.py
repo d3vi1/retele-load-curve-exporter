@@ -5,11 +5,14 @@ from pathlib import Path
 import httpx
 import pytest
 
+import dso_load_curves_exporter.__main__ as exporter
+import dso_retele_electrice.http_client as http_client
 from dso_retele_electrice.http_client import (
     AURA_PATH,
     CURVE_PATH,
     ENERGY_CODE_BY_CHANNEL,
     LOGIN_PATH,
+    POD_INFO_PATH,
     READINGS_PATH,
     ROUTE_PATH,
     ReteleElectriceHttpClient,
@@ -203,6 +206,161 @@ def test_aura_parser_rejects_non_success_actions_even_with_pod_like_data(state):
 
     with pytest.raises(ReteleElectriceHttpSemanticError, match=state):
         ReteleElectriceHttpClient.parse_aura_pod_discovery_response(body)
+
+
+def test_get_pod_metadata_fetches_direct_http_endpoint_and_parses_label_values():
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == POD_INFO_PATH:
+            assert request.url.params["pod"] == "RO001EXXXXXXXXX"
+            return httpx.Response(200, text=fixture("pod_metadata.html"))
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def run():
+        async with ReteleElectriceHttpClient(
+            "sanitized-user",
+            "sanitized-password",
+            account="main",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            return await client.get_pod_metadata("RO001EXXXXXXXXX")
+
+    metadata = asyncio.run(run())
+
+    assert requested_paths == [
+        f"GET {LOGIN_PATH}",
+        f"POST {LOGIN_PATH}",
+        f"GET {POD_INFO_PATH}",
+    ]
+    assert metadata.pod == "RO001EXXXXXXXXX"
+    assert metadata.account == "main"
+    assert metadata.supplier == "SANITIZED_SUPPLIER"
+    assert metadata.balancing_responsible_party == "SANITIZED_PRE"
+    assert metadata.customer_name == "SANITIZED_CUSTOMER"
+    assert metadata.approved_power_kw == "42"
+    assert metadata.address == "REDACTED_STREET 1, REDACTED_CITY"
+    assert metadata.atr_cer_number == "123456"
+    assert metadata.atr_cer_date == "01.02.2024"
+    assert metadata.voltage_level == "0,4 kV"
+    assert metadata.delimitation_voltage == "0,4 kV"
+    assert metadata.meter_status == "Activ"
+    assert metadata.meter_serial == "REDACTED_METER_SERIAL"
+    assert metadata.smartmeter_id == "REDACTED_METER_SERIAL"
+    assert metadata.meter_brand == "SANITIZED_BRAND"
+    assert metadata.meter_type == "SANITIZED_TYPE"
+    assert metadata.interval == "15 min"
+    assert metadata.accuracy_class == "Clasa B"
+    assert metadata.mount_date == "03.04.2024"
+    assert metadata.constant == "1"
+    assert metadata.extra["Furnizor"] == "SANITIZED_SUPPLIER"
+
+
+def test_http_configured_pods_bypass_aura_and_keep_metadata_on_per_pod_data_failure(monkeypatch):
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(f"{request.method} {request.url.path}")
+        if request.url.path == AURA_PATH:
+            raise AssertionError("configured POD runtime must not call Aura discovery")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == POD_INFO_PATH:
+            if request.url.params["pod"] == "RO001EXXXXXXXXX":
+                return httpx.Response(200, text=fixture("pod_metadata.html"))
+            return httpx.Response(500, text="sanitized metadata failure")
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path in {READINGS_PATH, CURVE_PATH}:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path == READINGS_PATH:
+            form = dict(httpx.QueryParams(request.content.decode()))
+            if form["pod"] == "RO001EXXXXXXXXX":
+                return httpx.Response(200, text=fixture("readings_visualforce.html"))
+            return httpx.Response(500, text="sanitized readings failure")
+        if request.method == "POST" and request.url.path == CURVE_PATH:
+            form = dict(httpx.QueryParams(request.content.decode()))
+            if form["pod"] == "RO001EXXXXXXXXX":
+                return httpx.Response(200, text=fixture("curve_samples_wi.json"))
+            return httpx.Response(500, text="sanitized curve failure")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    class TestClient(ReteleElectriceHttpClient):
+        def __init__(self, username, password, account="default"):
+            super().__init__(
+                username,
+                password,
+                account=account,
+                transport=httpx.MockTransport(handler),
+            )
+
+    monkeypatch.setattr(http_client, "ReteleElectriceHttpClient", TestClient)
+
+    async def run():
+        return await exporter._fetch_account_snapshot_http(
+            "main",
+            "sanitized-user",
+            "sanitized-password",
+            only_pods={"RO001EXXXXXXXXX", "RO001EYYYYYYYYY"},
+        )
+
+    metadata, readings, curves = asyncio.run(run())
+
+    assert f"POST {AURA_PATH}" not in requested_paths
+    assert [item.pod for item in metadata] == ["RO001EXXXXXXXXX", "RO001EYYYYYYYYY"]
+    assert metadata[0].supplier == "SANITIZED_SUPPLIER"
+    assert metadata[1].account == "main"
+    assert metadata[1].supplier == ""
+    assert [item.pod for item in readings] == ["RO001EXXXXXXXXX", "RO001EXXXXXXXXX"]
+    assert curves == []
+
+
+def test_http_configured_pods_raise_when_every_data_fetch_fails(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == AURA_PATH:
+            raise AssertionError("configured POD runtime must not call Aura discovery")
+        if request.method == "GET" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_page.html"))
+        if request.method == "POST" and request.url.path == LOGIN_PATH:
+            return httpx.Response(200, text=fixture("login_success.json"))
+        if request.method == "GET" and request.url.path == POD_INFO_PATH:
+            return httpx.Response(200, text=fixture("pod_metadata.html"))
+        if request.method == "GET" and request.url.path == ROUTE_PATH:
+            return httpx.Response(200, text="<html><body>Salesforce route shell</body></html>")
+        if request.method == "GET" and request.url.path in {READINGS_PATH, CURVE_PATH}:
+            return httpx.Response(200, text=fixture("visualforce_bootstrap.html"))
+        if request.method == "POST" and request.url.path in {READINGS_PATH, CURVE_PATH}:
+            return httpx.Response(500, text="sanitized data failure")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    class TestClient(ReteleElectriceHttpClient):
+        def __init__(self, username, password, account="default"):
+            super().__init__(
+                username,
+                password,
+                account=account,
+                transport=httpx.MockTransport(handler),
+            )
+
+    monkeypatch.setattr(http_client, "ReteleElectriceHttpClient", TestClient)
+
+    async def run():
+        return await exporter._fetch_account_snapshot_http(
+            "main",
+            "sanitized-user",
+            "sanitized-password",
+            only_pods={"RO001EXXXXXXXXX"},
+        )
+
+    with pytest.raises(RuntimeError, match="All configured POD data fetches failed"):
+        asyncio.run(run())
 
 
 def test_parse_visualforce_readings_table_to_meter_readings():

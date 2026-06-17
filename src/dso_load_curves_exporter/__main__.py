@@ -113,9 +113,10 @@ async def _fetch_account_snapshot_http(
     from dso_retele_electrice.http_client import ReteleElectriceHttpClient
 
     async with ReteleElectriceHttpClient(username, password, account=account) as client:
-        pods = await client.list_pods()
         if only_pods:
-            pods = [pod for pod in pods if pod.pod in only_pods]
+            return await _fetch_configured_pods_http_snapshot(client, account, only_pods)
+
+        pods = await client.list_pods()
 
         readings: list[MeterReading] = []
         curves: list[LoadCurveSample] = []
@@ -125,6 +126,54 @@ async def _fetch_account_snapshot_http(
             curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))
             await asyncio.sleep(0.2)
         return pods, readings, curves
+
+
+async def _fetch_configured_pods_http_snapshot(
+    client: object,
+    account: str,
+    only_pods: set[str],
+) -> tuple[list[PodMetadata], list[MeterReading], list[LoadCurveSample]]:
+    pods = [PodMetadata(pod=pod, account=account) for pod in sorted(only_pods)]
+    metadata: list[PodMetadata] = []
+    readings: list[MeterReading] = []
+    curves: list[LoadCurveSample] = []
+    data_attempts = 0
+    data_successes = 0
+    data_errors: list[str] = []
+    curve_day = date.today()
+
+    for pod in pods:
+        try:
+            metadata.append(await client.get_pod_metadata(pod.pod))  # type: ignore[attr-defined]
+        except Exception as exc:
+            metadata.append(pod)
+            print(f"poll warning account={account} pod={pod.pod} metadata failed: {exc}", flush=True)
+
+        try:
+            data_attempts += 1
+            readings.extend(await client.get_meter_readings(pod.pod))  # type: ignore[attr-defined]
+            data_successes += 1
+        except Exception as exc:
+            data_errors.append(f"{pod.pod} readings: {exc}")
+            print(f"poll warning account={account} pod={pod.pod} readings failed: {exc}", flush=True)
+
+        try:
+            data_attempts += 1
+            curves.extend(await client.get_load_curve_samples(pod.pod, curve_day))  # type: ignore[attr-defined]
+            data_successes += 1
+        except Exception as exc:
+            data_errors.append(f"{pod.pod} curves: {exc}")
+            print(f"poll warning account={account} pod={pod.pod} curves failed: {exc}", flush=True)
+
+        await asyncio.sleep(0.2)
+
+    if data_attempts and data_successes == 0:
+        details = "; ".join(data_errors[:4])
+        if len(data_errors) > 4:
+            details += f"; ... {len(data_errors) - 4} more"
+        raise RuntimeError(f"All configured POD data fetches failed for account {account}: {details}")
+
+    return metadata, readings, curves
 
 
 async def _fetch_account_snapshot_browser(

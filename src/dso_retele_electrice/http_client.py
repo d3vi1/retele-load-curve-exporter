@@ -23,12 +23,13 @@ from .http_core import (
 )
 from .http_session import HttpSessionStateMachine, StateTransition
 from .models import LoadCurveSample, MeterReading, PodMetadata
-from .parsing import BUCHAREST, OBIS_BY_CHANNEL, decimal_ro, parse_ro_date
+from .parsing import BUCHAREST, OBIS_BY_CHANNEL, decimal_ro, parse_ro_date, split_atr_cer
 
 BASE_URL = "https://contulmeu.reteleelectrice.ro"
 LOGIN_PATH = "/PEDRO_SiteLogin"
 ROUTE_PATH = "/s/"
 AURA_PATH = "/s/sfsites/aura"
+POD_INFO_PATH = "/s/new-pod-info-client"
 READINGS_PATH = "/PED_ProxyCallWSAsynSingleSelf_VF"
 CURVE_PATH = "/PED_ProxyCallWSAsync_Curve_VF"
 
@@ -166,6 +167,12 @@ class ReteleElectriceHttpClient:
         self._validate_aura_response(response, "POD discovery")
         return self.parse_aura_pod_discovery_response(response.text, account=self.account)
 
+    async def get_pod_metadata(self, pod: str) -> PodMetadata:
+        await self._ensure_login()
+        response = await self._client.get(POD_INFO_PATH, params={"pod": pod})
+        self._validate_response(response, "POD metadata")
+        return self.parse_pod_metadata_response(response.text, pod=pod, account=self.account)
+
     async def get_meter_readings(self, pod: str, expected_date: date | None = None) -> list[MeterReading]:
         form_data = await self._visualforce_form_payload(READINGS_PATH, "meter readings")
         form_data["pod"] = pod
@@ -234,6 +241,40 @@ class ReteleElectriceHttpClient:
         if not pods:
             raise ReteleElectriceHttpSemanticError("POD discovery response contains only malformed POD records.")
         return pods
+
+    @staticmethod
+    def parse_pod_metadata_response(html: str, *, pod: str, account: str = "default") -> PodMetadata:
+        _reject_error_payload(html, "POD metadata")
+        normalized = _normalize_text(html)
+        if _normalize_text(pod) not in normalized:
+            raise ReteleElectriceHttpSemanticError("POD metadata response does not contain the requested POD.")
+
+        fields = _parse_label_value_fields(html)
+        atr_number, atr_date = split_atr_cer(_pick(fields, "Nr. si dara ATR/CER", "Nr. si data ATR/CER"))
+        meter_serial = _pick(fields, "Seria Contorului", "Serie contor", "Serie de contor")
+        return PodMetadata(
+            pod=pod,
+            account=account,
+            supplier=_pick(fields, "Furnizor"),
+            balancing_responsible_party=_pick(fields, "PRE"),
+            customer_name=_pick(fields, "Nume Client", "Nume client"),
+            approved_power_kw=_pick(fields, "Puterea aprobata (kW)", "Putere aprobata", "Puterea aprobata"),
+            address=_pick(fields, "Adresa loc de consum", "Adresa"),
+            atr_cer_number=atr_number,
+            atr_cer_date=atr_date,
+            voltage_level=_pick(fields, "Tensiunea in punctul de delimitare"),
+            delimitation_voltage=_pick(fields, "Tensiunea in punctul de delimitare"),
+            meter_status=_pick(fields, "Stare", "Status"),
+            meter_serial=meter_serial,
+            smartmeter_id=meter_serial,
+            meter_brand=_pick(fields, "Marca"),
+            meter_type=_pick(fields, "Tip contor", "Tip"),
+            interval=_pick(fields, "Interval"),
+            accuracy_class=_pick(fields, "Precize", "Precizie", "Clasa precizie"),
+            mount_date=_pick(fields, "Data montare", "Data montarii"),
+            constant=_pick(fields, "Constanta"),
+            extra=fields,
+        )
 
     @staticmethod
     def parse_visualforce_readings_table(
@@ -756,6 +797,23 @@ def _pick(record: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _parse_label_value_fields(html: str) -> dict[str, str]:
+    fields = _LabelValueParser.parse(html)
+    for table in _TableParser.parse(html):
+        for row in table:
+            if len(row) < 2:
+                continue
+            key = _clean_field_label(row[0])
+            value = _collapse(row[1])
+            if key and value and key not in fields:
+                fields[key] = value
+    return fields
+
+
+def _clean_field_label(value: str) -> str:
+    return _collapse(str(value or "").rstrip(":"))
+
+
 def _find_curve_graph(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         if isinstance(value.get("sampleValues"), list):
@@ -914,3 +972,122 @@ class _TableParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._cell is not None:
             self._cell.append(data)
+
+
+class _LabelValueParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.fields: dict[str, str] = {}
+        self._labels_by_for: dict[str, str] = {}
+        self._controls_by_id: dict[str, str] = {}
+        self._label_stack: list[dict[str, Any]] = []
+        self._textarea: dict[str, str] | None = None
+        self._pending_label: str = ""
+        self._pending_text: list[str] = []
+        self._ignored_depth = 0
+
+    @classmethod
+    def parse(cls, html: str) -> dict[str, str]:
+        parser = cls()
+        parser.feed(html or "")
+        parser.close()
+        parser._flush_pending_text()
+        return parser.fields
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        attr_map = {name.casefold(): value or "" for name, value in attrs}
+        if tag in {"script", "style"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
+        if tag == "label":
+            self._flush_pending_text()
+            self._label_stack.append({"for": attr_map.get("for", ""), "text": [], "value": ""})
+            return
+        if tag == "textarea":
+            self._textarea = {"id": attr_map.get("id", ""), "name": attr_map.get("name", ""), "text": ""}
+            return
+        if tag != "input":
+            return
+
+        value = _collapse(attr_map.get("value", ""))
+        control_id = attr_map.get("id", "")
+        control_name = attr_map.get("name", "")
+        if control_id and value:
+            self._controls_by_id[control_id] = value
+        if control_name and value:
+            self._controls_by_id.setdefault(control_name, value)
+        self._assign_control_value(control_id, control_name, value)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag in {"script", "style"}:
+            self._ignored_depth = max(0, self._ignored_depth - 1)
+            return
+        if self._ignored_depth:
+            return
+        if tag == "label" and self._label_stack:
+            label = self._label_stack.pop()
+            key = _clean_field_label("".join(label["text"]))
+            value = _collapse(label["value"])
+            label_for = label["for"]
+            if key and label_for:
+                self._labels_by_for[label_for] = key
+                value = value or self._controls_by_id.get(label_for, "")
+            if key and value:
+                self.fields[key] = value
+                self._pending_label = ""
+                self._pending_text = []
+            elif key:
+                self._pending_label = key
+                self._pending_text = []
+            return
+        if tag == "textarea" and self._textarea is not None:
+            value = _collapse(self._textarea["text"])
+            control_id = self._textarea["id"]
+            control_name = self._textarea["name"]
+            if control_id and value:
+                self._controls_by_id[control_id] = value
+            if control_name and value:
+                self._controls_by_id.setdefault(control_name, value)
+            self._assign_control_value(control_id, control_name, value)
+            self._textarea = None
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        if self._textarea is not None:
+            self._textarea["text"] += data
+            return
+        if self._label_stack:
+            self._label_stack[-1]["text"].append(data)
+            return
+        if self._pending_label and _collapse(data):
+            self._pending_text.append(data)
+
+    def _assign_control_value(self, control_id: str, control_name: str, value: str) -> None:
+        if not value:
+            return
+        if self._label_stack:
+            self._label_stack[-1]["value"] = value
+            return
+        for key in (control_id, control_name):
+            label = self._labels_by_for.get(key)
+            if label:
+                self.fields[label] = value
+                return
+        if self._pending_label:
+            self.fields[self._pending_label] = value
+            self._pending_label = ""
+            self._pending_text = []
+
+    def _flush_pending_text(self) -> None:
+        if not self._pending_label:
+            return
+        value = _collapse(" ".join(self._pending_text))
+        if value:
+            self.fields[self._pending_label] = value
+        self._pending_label = ""
+        self._pending_text = []
